@@ -4537,7 +4537,10 @@ mod tests {
         .into_iter()
         .collect();
         let (accepted, dropped) = drain_guard(&seq);
-        assert_eq!(accepted, 1, "the leading Esc is delivered, the rest dropped");
+        assert_eq!(
+            accepted, 1,
+            "the leading Esc is delivered, the rest dropped"
+        );
         assert_eq!(dropped, seq.len() - 1);
     }
 

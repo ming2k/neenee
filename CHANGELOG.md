@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-07-01
+
+### Fixed
+
+- **Wide characters no longer leave jagged edges on modal/panel borders.** When a
+  rectangle fill, row clear, or string overwrite had to repaint a cell occupied
+  by a wide glyph (emoji, CJK — display width 2), only one half of the cell was
+  reconciled, leaving the other half as a stray width-0 continuation carrying a
+  stale background — visible as ghosting along the edges of modals, bands, and
+  panels. Every mutating path in `Grid` (`set`, `put`, `fill_rect`, `clear_row`)
+  now detects and repairs the neighboring half-wide cell before writing, so
+  borders stay clean regardless of the wide-character content underneath.
+
+### Changed
+
+- **The token bill modal is now a two-level report with a per-model drill-down.**
+  What was a flat provider/model bill gained an interactive detail view: pressing
+  `Enter` on a selected row opens that provider/model's detail, showing the
+  reported-upstream vs. local-estimate source split, input/output totals,
+  Anthropic prompt-cache read/write counts with a computed cache hit-rate, and a
+  per-round line-item table (round number, source, input, output, total, cache
+  r/w). `↑`/`↓` scroll the detail body; the first `Esc` steps back to the bill
+  list, the second closes the modal. The token ledger now records a `TokenRound`
+  per turn so the report can break usage down by round; the title switches from
+  "Token Bill" to "Token Detail" and the footer hints update accordingly.
+
 ## [0.13.1] - 2026-06-30
 
 ### Fixed
@@ -848,7 +874,8 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/ming2k/neenee/releases/tag/v0.13.2
 [0.13.1]: https://github.com/ming2k/neenee/releases/tag/v0.13.1
 [0.11.0]: https://github.com/ming2k/neenee/releases/tag/v0.11.0
 [0.10.1]: https://github.com/ming2k/neenee/releases/tag/v0.10.1

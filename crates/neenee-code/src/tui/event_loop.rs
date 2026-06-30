@@ -2743,46 +2743,46 @@ pub(super) async fn run_app_loop(
                         app.token_report_scroll = 0;
                     } else {
                         // Most modals close straight to chat. The model editor
-                    // instead steps back to the model picker, so a key entry is
-                    // recoverable with Esc.
-                    let mut return_to_picker = false;
-                    if app.active_modal == Modal::HistorySearch {
-                        // Closing from either browse or search: hand the parked
-                        // draft back so Esc is a true cancel, and clear the
-                        // search sub-layer / preview flags for the next open.
-                        app.restore_history_draft();
-                    } else if app.active_modal == Modal::Provider {
-                        // The input box may have been borrowed as the fuzzy
-                        // filter (search sub-layer); hand the parked draft back
-                        // and clear the search/scroll flags so Esc cancels
-                        // cleanly. (The two-stage Esc inside search is handled
-                        // earlier by `ModelExitSearch`; this path is the
-                        // browse-mode close.)
-                        app.restore_model_draft();
-                    } else if app.active_modal == Modal::ModelEditor {
-                        // Cancel the editor: discard its fields and return to
-                        // the picker in browse mode. The original chat draft
-                        // stays in stashed_input for when the picker itself
-                        // closes.
-                        app.editor_target = None;
-                        app.editor_model_settings_only = false;
-                        app.editor_target_is_builtin = false;
-                        app.input.clear();
-                        app.set_cursor(0);
-                        app.model_search = false;
-                        app.model_modal_follow = true;
-                        return_to_picker = true;
-                    } else if app.active_modal == Modal::CustomProvider {
-                        // Same as Esc: discard the editor fields and step back to
-                        // the picker; the chat draft stays parked in stashed_input.
-                        app.input.clear();
-                        app.set_cursor(0);
-                        app.custom_field = 0;
-                        app.model_search = false;
-                        app.model_modal_follow = true;
-                        app.modal_index = 0;
-                        return_to_picker = true;
-                    }
+                        // instead steps back to the model picker, so a key entry is
+                        // recoverable with Esc.
+                        let mut return_to_picker = false;
+                        if app.active_modal == Modal::HistorySearch {
+                            // Closing from either browse or search: hand the parked
+                            // draft back so Esc is a true cancel, and clear the
+                            // search sub-layer / preview flags for the next open.
+                            app.restore_history_draft();
+                        } else if app.active_modal == Modal::Provider {
+                            // The input box may have been borrowed as the fuzzy
+                            // filter (search sub-layer); hand the parked draft back
+                            // and clear the search/scroll flags so Esc cancels
+                            // cleanly. (The two-stage Esc inside search is handled
+                            // earlier by `ModelExitSearch`; this path is the
+                            // browse-mode close.)
+                            app.restore_model_draft();
+                        } else if app.active_modal == Modal::ModelEditor {
+                            // Cancel the editor: discard its fields and return to
+                            // the picker in browse mode. The original chat draft
+                            // stays in stashed_input for when the picker itself
+                            // closes.
+                            app.editor_target = None;
+                            app.editor_model_settings_only = false;
+                            app.editor_target_is_builtin = false;
+                            app.input.clear();
+                            app.set_cursor(0);
+                            app.model_search = false;
+                            app.model_modal_follow = true;
+                            return_to_picker = true;
+                        } else if app.active_modal == Modal::CustomProvider {
+                            // Same as Esc: discard the editor fields and step back to
+                            // the picker; the chat draft stays parked in stashed_input.
+                            app.input.clear();
+                            app.set_cursor(0);
+                            app.custom_field = 0;
+                            app.model_search = false;
+                            app.model_modal_follow = true;
+                            app.modal_index = 0;
+                            return_to_picker = true;
+                        }
                         app.active_modal = if return_to_picker {
                             Modal::Provider
                         } else {

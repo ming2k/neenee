@@ -142,8 +142,11 @@ fn list_body<'a>(
         let selected = i == sel;
         let marker = if selected { "> " } else { "  " };
         let label = truncate_str(&format!("{} · {}", row.provider, row.model), name_budget);
-        let (src_text, src_color) =
-            source_label(row.totals.reported_tokens, row.totals.estimated_tokens, theme);
+        let (src_text, src_color) = source_label(
+            row.totals.reported_tokens,
+            row.totals.estimated_tokens,
+            theme,
+        );
         let name_style = if selected {
             Style::default()
                 .fg(theme.brand())
@@ -152,7 +155,10 @@ fn list_body<'a>(
             Style::default().fg(theme.fg())
         };
         body.push(Line::from(vec![
-            Span::styled(format!("{marker}{:<w$}", label, w = name_budget), name_style),
+            Span::styled(
+                format!("{marker}{:<w$}", label, w = name_budget),
+                name_style,
+            ),
             Span::styled(
                 format!("{:>w$}", fmt_tokens(row.totals.total()), w = TOTAL_W),
                 Style::default().fg(theme.fg()),
@@ -172,7 +178,11 @@ fn list_body<'a>(
             Style::default().fg(theme.fg()).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{:>w$}", fmt_tokens(report.grand_total.total()), w = TOTAL_W),
+            format!(
+                "{:>w$}",
+                fmt_tokens(report.grand_total.total()),
+                w = TOTAL_W
+            ),
             Style::default()
                 .fg(theme.brand())
                 .add_modifier(Modifier::BOLD),
@@ -305,13 +315,19 @@ fn detail_body<'a>(
             "—".to_string()
         };
         body.push(Line::from(vec![
-            Span::styled(format!("{:>3}  ", i + 1), Style::default().fg(theme.muted())),
+            Span::styled(
+                format!("{:>3}  ", i + 1),
+                Style::default().fg(theme.muted()),
+            ),
             Span::styled(format!("{:<9}", src), Style::default().fg(src_color)),
             Span::styled(
                 format!("{:>9}{:>9}{:>9}", input, output, fmt_tokens(r.total_tokens)),
                 Style::default().fg(theme.fg()),
             ),
-            Span::styled(format!("   {:<13}", cache), Style::default().fg(theme.muted())),
+            Span::styled(
+                format!("   {:<13}", cache),
+                Style::default().fg(theme.muted()),
+            ),
         ]));
     }
 

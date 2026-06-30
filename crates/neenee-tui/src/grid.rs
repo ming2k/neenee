@@ -333,7 +333,7 @@ impl Grid {
                 self.mark(start_x - 1, y);
             }
         }
-        
+
         let blank = Cell::blank_styled(style);
         let start = self.index_of(start_x, y);
         let end = self.index_of(self.width, y);
@@ -358,9 +358,7 @@ impl Grid {
     /// Clear all dirty bookkeeping. Called after a diff is promoted into the
     /// front grid: the back grid now matches the terminal, so nothing is dirty.
     pub fn clear_dirty(&mut self) {
-        for slot in &mut self.dirty_col {
-            *slot = None;
-        }
+        self.dirty_col.fill(None);
         self.dirty_row_lo = None;
         self.dirty_row_hi = None;
     }
