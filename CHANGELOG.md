@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-06-30
+
+### Fixed
+
+- **Split SGR mouse reports no longer leak as stray keypresses.** crossterm
+  occasionally returns a single mouse report split across two `read()` calls as
+  a run of spurious `Char`/`Esc` events — worst on resize, fast trackpad
+  scrolling, and inside multiplexers — which reached the composer as phantom
+  keypresses. The reader thread now runs an `SgrLeakGuard` state machine behind
+  a reassembly sink: when a freshly read event matches the `ESC [ < …` prefix of
+  an SGR sequence, it keeps draining within a short deadline and drops the
+  reassembled sequence at the source. A symbol-layer guard in the event loop
+  remains as a backstop for any fragment that still escapes the window.
+
 ## [0.13.0] - 2026-06-30
 
 ### Fixed
@@ -834,7 +848,8 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/ming2k/neenee/releases/tag/v0.13.1
 [0.11.0]: https://github.com/ming2k/neenee/releases/tag/v0.11.0
 [0.10.1]: https://github.com/ming2k/neenee/releases/tag/v0.10.1
 [0.10.0]: https://github.com/ming2k/neenee/releases/tag/v0.10.0
