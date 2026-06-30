@@ -2,6 +2,7 @@
 
 | Page | Purpose |
 |------|---------|
+| [Release process](release.md) | Versioning, the pre-tag CI checklist, and the tag/publish workflow |
 | [Documentation governance](documentation/index.md) | Rules for organizing, writing, and reviewing docs |
 | [TUI component showcase](showcase.md) | Interactive playground for rendering and testing individual TUI modals in isolation |
 
