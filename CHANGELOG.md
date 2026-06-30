@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-06-30
+
 ### Fixed
 
 - **Resume no longer shows a one-frame scroll jump.** Opening a session replaced
