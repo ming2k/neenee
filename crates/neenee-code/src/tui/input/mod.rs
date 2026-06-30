@@ -67,6 +67,13 @@ pub struct InputContext {
     /// not open. Drives ←/→ effort cycling (field 1) and Space thinking toggle
     /// (field 2). Mirrors `App::editor_field` while the key editor is open.
     pub editor_field: Option<u8>,
+    /// Whether the Question modal's synthetic "Other" free-text row is the
+    /// highlighted row. Only meaningful while [`Self::active_modal`] is
+    /// [`super::Modal::Question`]: when `true` the modal owns a text-input
+    /// surface, so printable keys (including Space) insert into the "Other"
+    /// field instead of toggling an option. Mirrors
+    /// `App::question.is_some_and(|q| q.is_other_highlighted())`.
+    pub question_other_highlighted: bool,
 }
 
 impl InputContext {
@@ -441,6 +448,13 @@ pub enum InputAction {
     PrevSibling,
     /// Move to the next sibling envoy task.
     NextSibling,
+    /// Terminal was resized (SIGWINCH). The event loop forces a redraw and
+    /// re-emits `EnableMouseCapture` so the crossterm parser's internal state
+    /// machine is resynced: a resize frequently splits an in-flight SGR mouse
+    /// sequence across `event::read()` boundaries, and crossterm then hands the
+    /// leftover bytes back as spurious `KeyCode::Char` events (issue #854/#668).
+    /// Re-arming capture is the cleanest way to get both sides back in step.
+    TerminalResized,
 }
 
 /// Insert a literal newline at the cursor position, but only in modals that
@@ -623,6 +637,121 @@ fn cursor_line_down(input: &str, cursor_position: &mut usize) -> bool {
     let target = next_start + col.min(next_end - next_start);
     *cursor_position = target;
     true
+}
+
+/// SGR mouse-sequence leakage guard.
+///
+/// Background: crossterm sometimes fails to reassemble a mouse report that
+/// arrives split across two `event::read()` calls (issue #854/#668). When that
+/// happens the bytes of an SGR mouse sequence (`ESC [ < btn ; col ; row M/m`)
+/// are handed back as a stream of ordinary `Event::Key` / `KeyCode::Char`
+/// events: `Esc`, `[`, `<`, `6`, `5`, `;`, … `M`. Because the composer's
+/// `KeyCode::Char` arm inserts every printable char into the input box, the
+/// split sequence shows up as garbage text (e.g. `;25M[<35;56;25M…`). This is
+/// observed across terminals on resize, fast trackpad scrolling, and inside
+/// multiplexers (tmux/screen/xterm.js).
+///
+/// `SgrLeakGuard` is a tiny state machine fed one event at a time. While it is
+/// tracking what looks like a leaked SGR sequence it reports [`Feed::Drop`],
+/// swallowing the fragments *before* they reach `process_event` and mutate the
+/// input line. The pattern is deliberately narrow so a genuine `Esc` keypress
+/// still works: it only enters the suppression state on the `ESC [ <` prefix
+/// (the mouse-sequence intro) — a bare `Esc` with nothing following stays a
+/// real key.
+///
+/// The guard is best-effort at the symbol layer; the primary defense is the
+/// reader-thread reassembler in `event_loop::InputReader`, which keeps whole
+/// sequences intact in the common case so the guard rarely sees anything.
+#[derive(Debug, Default, Clone)]
+pub struct SgrLeakGuard {
+    state: SgrState,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum SgrState {
+    /// Idle: no suspicious prefix seen.
+    #[default]
+    Idle,
+    /// Saw `ESC`; waiting to see if `[` follows (start of a CSI).
+    SawEsc,
+    /// Saw `ESC [`; waiting for `<` (SGR mouse) — anything else aborts.
+    SawCsi,
+    /// Inside an SGR mouse payload after `ESC [ <`. Swallow digits/`;` and the
+    /// terminating `M`/`m`, then return to idle.
+    InSgr,
+}
+
+/// Outcome of feeding one event to the guard.
+pub enum Feed {
+    /// The event is not part of a leaked sequence — handle it normally.
+    Accept,
+    /// The event looks like part of a leaked SGR sequence — drop it silently.
+    Drop,
+}
+
+impl SgrLeakGuard {
+    /// Feed one event. Returns whether the caller should still process it.
+    /// Pure: performs no I/O and never mutates the input line.
+    pub fn feed(&mut self, event: &Event) -> Feed {
+        let Event::Key(key) = event else {
+            // A non-key event (Mouse/Resize/Paste/Focus) always resets the
+            // tracker: if crossterm *did* manage to parse a whole mouse event
+            // we clearly are no longer mid-leak, and a resize is exactly the
+            // disruption that starts one, so resync here.
+            self.state = SgrState::Idle;
+            return Feed::Accept;
+        };
+        let c = match key.code {
+            KeyCode::Char(c) => c,
+            // Esc as a control key (not a printable char) — a possible SGR
+            // prefix start. Treat it as the intro byte.
+            KeyCode::Esc => '\x1b',
+            _ => {
+                // Any other real key (Backspace, arrows, F-keys, Enter, …)
+                // breaks a half-formed sequence.
+                self.state = SgrState::Idle;
+                return Feed::Accept;
+            }
+        };
+
+        // The match returns (next_state, is_part_of_sequence). A character is
+        // part of a leaked sequence when it either advances the tracker or is
+        // the sequence's terminator; a character that *aborts* an in-progress
+        // prefix (e.g. `ESC [` followed by a letter instead of `<`) is NOT part
+        // of any mouse report, so it is handed back to the caller as Accept.
+        let (next, part) = match (self.state, c) {
+            (SgrState::Idle, '\x1b') => (SgrState::SawEsc, true),
+            (SgrState::SawEsc, '[') => (SgrState::SawCsi, true),
+            // The SGR mouse intro. Once we see this prefix the rest of the
+            // payload is unambiguously a mouse report fragment.
+            (SgrState::SawCsi, '<') => (SgrState::InSgr, true),
+            // Terminators: the final byte of the report.
+            (SgrState::InSgr, 'M') | (SgrState::InSgr, 'm') => (SgrState::Idle, true),
+            // Continuation bytes of the payload.
+            (SgrState::InSgr, '0'..='9' | ';' | '\u{1b}') => (SgrState::InSgr, true),
+            // Aborted sequences: the bytes we tentatively buffered were not an
+            // SGR mouse report after all. Hand the *current* char back for
+            // normal processing (it is genuine input) and resync to idle.
+            (SgrState::InSgr, _) => (SgrState::Idle, false),
+            (SgrState::SawEsc, '\x1b') => (SgrState::SawEsc, true),
+            (SgrState::SawEsc | SgrState::SawCsi, _) => (SgrState::Idle, false),
+            (SgrState::Idle, _) => (SgrState::Idle, false),
+        };
+        self.state = next;
+        if part { Feed::Drop } else { Feed::Accept }
+    }
+
+    /// Reset the tracker. Called after a resize so a fresh, fully-armed mouse
+    /// session starts from a known state.
+    pub fn reset(&mut self) {
+        self.state = SgrState::Idle;
+    }
+
+    /// Whether the tracker is currently idle (not mid-sequence). Used by the
+    /// reader-thread reassembler to know when a drain has completed.
+    pub fn is_idle(&self) -> bool {
+        self.state == SgrState::Idle
+    }
 }
 
 /// Process a crossterm event into a high-level action.
@@ -1240,7 +1369,10 @@ pub fn process_event(
                             _ => {}
                         }
                     }
-                    if context.active_modal == super::Modal::Question && c == ' ' {
+                    if context.active_modal == super::Modal::Question
+                        && c == ' '
+                        && !context.question_other_highlighted
+                    {
                         return InputAction::QuestionToggle;
                     }
                     // Space inside the tools manager toggles the selected
@@ -1739,6 +1871,12 @@ pub fn process_event(
                 InputAction::None
             }
         }
+        Event::Resize(..) => {
+            // The event loop does the real work (redraw + re-arm mouse capture)
+            // off this signal; here we just surface that the terminal geometry
+            // changed rather than leaving it to the catch-all `None`.
+            InputAction::TerminalResized
+        }
         _ => InputAction::None,
     }
 }
@@ -1785,6 +1923,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         )
@@ -1831,6 +1970,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         )
@@ -1954,6 +2094,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -1995,6 +2136,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2035,6 +2177,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2072,6 +2215,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2109,6 +2253,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2150,6 +2295,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2191,6 +2337,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2227,6 +2374,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2304,6 +2452,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         )
@@ -2341,6 +2490,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2374,6 +2524,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2407,6 +2558,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2442,6 +2594,7 @@ mod tests {
                 picker_in_models_stage: true,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2476,6 +2629,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2512,6 +2666,7 @@ mod tests {
                 picker_in_models_stage: true,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2548,6 +2703,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2580,6 +2736,7 @@ mod tests {
             picker_in_models_stage: false,
             editor_field: None,
             custom_provider_field: None,
+            question_other_highlighted: false,
         };
         let letter = process_event(
             Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
@@ -2631,6 +2788,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2660,6 +2818,7 @@ mod tests {
             picker_in_models_stage: false,
             editor_field: None,
             custom_provider_field: None,
+            question_other_highlighted: false,
         };
         let action = process_event(
             Event::Key(crossterm::event::KeyEvent::new(
@@ -2700,6 +2859,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -2731,6 +2891,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         )
@@ -2762,6 +2923,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         )
@@ -2977,6 +3139,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         )
@@ -3135,6 +3298,7 @@ mod tests {
                     picker_in_models_stage: false,
                     editor_field: None,
                     custom_provider_field: None,
+                    question_other_highlighted: false,
                 },
                 &mut drag,
             )
@@ -3398,6 +3562,58 @@ mod tests {
         assert_eq!(action, InputAction::None);
         assert_eq!(input, "abc");
         assert_eq!(cursor, 3);
+    }
+
+    #[test]
+    fn question_space_toggles_when_other_row_not_highlighted() {
+        // On a normal option row, Space toggles the option — it must not be
+        // swallowed as free text.
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent {
+                code: KeyCode::Char(' '),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::Question,
+                question_other_highlighted: false,
+                ..Default::default()
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::QuestionToggle);
+    }
+
+    #[test]
+    fn question_space_inserts_into_other_free_text_row() {
+        // When the synthetic "Other" free-text row is highlighted, Space is an
+        // ordinary character — it must insert into the field, not toggle.
+        let mut input = String::new();
+        let mut cursor = 0;
+        let mut drag = SelectionDrag::default();
+        let action = process_event(
+            Event::Key(KeyEvent {
+                code: KeyCode::Char(' '),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                state: KeyEventState::NONE,
+            }),
+            &mut input,
+            &mut cursor,
+            InputContext {
+                active_modal: crate::tui::Modal::Question,
+                question_other_highlighted: true,
+                ..Default::default()
+            },
+            &mut drag,
+        );
+        assert_eq!(action, InputAction::QuestionInsertChar(' '));
     }
 
     #[test]
@@ -3690,6 +3906,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         )
@@ -3774,6 +3991,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         )
@@ -3894,6 +4112,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -3926,6 +4145,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -3962,6 +4182,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         )
@@ -4017,6 +4238,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -4057,6 +4279,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         )
@@ -4184,6 +4407,7 @@ mod tests {
                 picker_in_models_stage: false,
                 editor_field: None,
                 custom_provider_field: None,
+                question_other_highlighted: false,
             },
             &mut drag,
         );
@@ -4232,5 +4456,167 @@ mod tests {
         let (action, cur) = multiline_arrow(seed, start, KeyCode::Up);
         assert_eq!(action, InputAction::None);
         assert_eq!(cur, 2, "column should clamp to the first line's length");
+    }
+
+    // --- SgrLeakGuard -------------------------------------------------------
+
+    /// Build a crossterm `Event::Key` for a single character, the form crossterm
+    /// returns when it fails to reassemble a split escape sequence.
+    fn leaked_char(c: char) -> Event {
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState};
+        Event::Key(KeyEvent {
+            code: KeyCode::Char(c),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        })
+    }
+
+    fn leaked_esc() -> Event {
+        use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState};
+        Event::Key(KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        })
+    }
+
+    /// Drive a sequence of events through a fresh guard and report how many it
+    /// dropped vs accepted.
+    fn drain_guard(events: &[Event]) -> (usize, usize) {
+        let mut g = SgrLeakGuard::default();
+        let mut dropped = 0;
+        let mut accepted = 0;
+        for ev in events {
+            match g.feed(ev) {
+                Feed::Drop => dropped += 1,
+                Feed::Accept => accepted += 1,
+            }
+        }
+        (accepted, dropped)
+    }
+
+    #[test]
+    fn sgr_guard_drops_split_sgr_mouse_sequence() {
+        // The exact symptom from the field: a mouse report crossterm split into
+        // individual chars. `ESC [ < 0 ; 3 5 ; 4 6 M` should vanish entirely.
+        let seq: Vec<Event> = [
+            leaked_esc(),
+            leaked_char('['),
+            leaked_char('<'),
+            leaked_char('0'),
+            leaked_char(';'),
+            leaked_char('3'),
+            leaked_char('5'),
+            leaked_char(';'),
+            leaked_char('4'),
+            leaked_char('6'),
+            leaked_char('M'),
+        ]
+        .into_iter()
+        .collect();
+        let (accepted, dropped) = drain_guard(&seq);
+        assert_eq!(accepted, 0, "no byte of a split SGR sequence should leak");
+        assert_eq!(dropped, seq.len());
+    }
+
+    #[test]
+    fn sgr_guard_drops_release_variant_lowercase_m() {
+        // SGR release uses lowercase `m`. Same coverage as the press variant.
+        let seq: Vec<Event> = [
+            leaked_esc(),
+            leaked_char('['),
+            leaked_char('<'),
+            leaked_char('3'),
+            leaked_char('5'),
+            leaked_char(';'),
+            leaked_char('5'),
+            leaked_char('6'),
+            leaked_char('m'),
+        ]
+        .into_iter()
+        .collect();
+        let (accepted, _) = drain_guard(&seq);
+        assert_eq!(accepted, 0);
+    }
+
+    #[test]
+    fn sgr_guard_drops_run_of_split_sequences() {
+        // The real complaint showed *many* sequences back to back (resize drag).
+        // The guard must resync to idle after each terminating M/m and catch
+        // the next one too.
+        let one = |b: char| {
+            vec![
+                leaked_esc(),
+                leaked_char('['),
+                leaked_char('<'),
+                leaked_char(b),
+                leaked_char(';'),
+                leaked_char('1'),
+                leaked_char('M'),
+            ]
+        };
+        let seq: Vec<Event> = [one('0'), one('3'), one('5')]
+            .into_iter()
+            .flatten()
+            .collect();
+        let (accepted, _) = drain_guard(&seq);
+        assert_eq!(accepted, 0, "every sequence in a run must be swallowed");
+    }
+
+    #[test]
+    fn sgr_guard_passes_through_normal_typing() {
+        // Ordinary typing must be unaffected — the guard never enters a
+        // tracking state and hands every char back as Accept.
+        let seq: Vec<Event> = ['h', 'e', 'l', 'l', 'o']
+            .into_iter()
+            .map(leaked_char)
+            .collect();
+        let (accepted, dropped) = drain_guard(&seq);
+        assert_eq!(accepted, seq.len());
+        assert_eq!(dropped, 0);
+    }
+
+    #[test]
+    fn sgr_guard_recovers_from_aborted_prefix() {
+        // `ESC [` followed by something other than `<` is a real CSI (e.g. an
+        // arrow key's payload). The buffered ESC and [ should not be silently
+        // lost beyond a single resync; after aborting, normal typing resumes.
+        let mut g = SgrLeakGuard::default();
+        // ESC [ A = Up arrow, delivered as separate chars by a broken read.
+        assert!(matches!(g.feed(&leaked_esc()), Feed::Drop));
+        assert!(matches!(g.feed(&leaked_char('[')), Feed::Drop));
+        // 'A' is not the SGR intro: the guard aborts and *this* event is
+        // accepted (returned to the caller to deal with), then goes idle.
+        assert!(matches!(g.feed(&leaked_char('A')), Feed::Accept));
+        assert!(g.is_idle());
+        // Subsequent normal typing is accepted.
+        assert!(matches!(g.feed(&leaked_char('x')), Feed::Accept));
+    }
+
+    #[test]
+    fn sgr_guard_resets_on_non_key_events() {
+        // A genuine parsed mouse event or a resize resyncs the tracker, so a
+        // half-buffered prefix can't poison the next real interaction.
+        let mut g = SgrLeakGuard::default();
+        assert!(matches!(g.feed(&leaked_esc()), Feed::Drop));
+        assert!(matches!(g.feed(&leaked_char('[')), Feed::Drop));
+        assert!(matches!(g.feed(&Event::Resize(80, 24)), Feed::Accept));
+        assert!(g.is_idle());
+        assert!(matches!(g.feed(&leaked_char('x')), Feed::Accept));
+    }
+
+    #[test]
+    fn sgr_guard_survives_garbage_inside_payload() {
+        // A malformed payload (non-digit, non-;) while inside an SGR sequence
+        // resyncs to idle instead of swallowing arbitrary following text.
+        let mut g = SgrLeakGuard::default();
+        for ev in [leaked_esc(), leaked_char('['), leaked_char('<')] {
+            assert!(matches!(g.feed(&ev), Feed::Drop));
+        }
+        // A letter that is not the terminator: abort and resync.
+        assert!(matches!(g.feed(&leaked_char('Z')), Feed::Accept));
+        assert!(g.is_idle());
     }
 }

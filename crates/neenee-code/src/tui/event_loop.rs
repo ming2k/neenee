@@ -249,6 +249,14 @@ impl InputReader {
         std::thread::Builder::new()
             .name("neenee-tui-input".into())
             .spawn(move || {
+                // The SGR reassembly sink. crossterm occasionally hands back a
+                // split mouse report as a run of spurious `Char` events (issue
+                // #854/#668) — worst on resize, fast trackpad scrolling, and
+                // inside multiplexers. The sink keeps those fragments from
+                // ever reaching the composer by re-draining the tail of the
+                // sequence within a short window whenever the guard flags a
+                // suspicious prefix.
+                let mut sink = SgrReassemblySink::new(tx);
                 // Poll with a bounded timeout instead of blocking forever in
                 // `read()`: a ready event still returns immediately (zero added
                 // input latency), while the timeout lets the thread notice the
@@ -258,7 +266,7 @@ impl InputReader {
                         Ok(true) => match event::read() {
                             // Receiver gone → the loop has exited; stop reading.
                             Ok(ev) => {
-                                if tx.send(ev).is_err() {
+                                if !sink.handle(ev) {
                                     break;
                                 }
                             }
@@ -271,6 +279,96 @@ impl InputReader {
                 }
             })?;
         Ok(Self { shutdown })
+    }
+}
+
+/// Reader-thread SGR reassembly sink.
+///
+/// Wraps the event channel so that a mouse report crossterm split across two
+/// `event::read()` calls is re-drained and dropped *here*, at the source,
+/// instead of leaking to the composer as stray `Char` events (see
+/// [`input::SgrLeakGuard`] for the full background). When a freshly read event
+/// trips the symbol-layer guard — i.e. it looks like the `ESC [ < …` prefix of
+/// an SGR mouse sequence — the sink keeps reading within a short deadline,
+/// feeding every subsequent event to the same guard and discarding it, until
+/// the guard returns to idle or the deadline elapses.
+///
+/// The deadline is intentionally tiny (a few ms): the tail of a split sequence
+/// is already in the kernel TTY buffer and arrives on the very next `poll`, so
+/// a real `Esc` key that the guard tentatively flagged pays at most one extra
+/// short poll before being delivered normally. The symbol-layer guard in the
+/// event loop is the backstop for any fragment that still escapes this window.
+struct SgrReassemblySink {
+    tx: mpsc::UnboundedSender<Event>,
+    guard: input::SgrLeakGuard,
+}
+
+/// How long to keep draining a suspected split SGR sequence before giving up
+/// and delivering the buffered event normally. The tail bytes are normally
+/// already queued in the TTY, so this is only paid in pathological cases.
+const SGR_REASSEMBLY_WINDOW: std::time::Duration = std::time::Duration::from_millis(40);
+
+impl SgrReassemblySink {
+    fn new(tx: mpsc::UnboundedSender<Event>) -> Self {
+        Self {
+            tx,
+            guard: input::SgrLeakGuard::default(),
+        }
+    }
+
+    /// Handle one freshly-read event. Returns `false` if the channel is closed
+    /// and the reader thread should stop.
+    fn handle(&mut self, ev: Event) -> bool {
+        use input::Feed;
+        match self.guard.feed(&ev) {
+            Feed::Accept => {
+                // Not (yet) part of a leaked sequence. If the guard is now idle
+                // this is a clean, deliverable event; if it just entered a
+                // tracking state we still deliver the *current* event and let
+                // the next `read()` advance the guard — the symbol-layer guard
+                // in the loop is the final backstop.
+                self.deliver(ev)
+            }
+            Feed::Drop => {
+                // Looks like SGR leakage. Drain the rest of the sequence within
+                // a short window so the fragments never reach the composer.
+                self.drain_split_sequence();
+                true
+            }
+        }
+    }
+
+    /// Deliver an event, reporting channel closure to the caller.
+    fn deliver(&self, ev: Event) -> bool {
+        self.tx.send(ev).is_ok()
+    }
+
+    /// Best-effort drain of the tail of a split SGR mouse sequence. Each event
+    /// read here is fed to the guard and discarded; the loop ends when the guard
+    /// returns to idle, the channel closes, or the deadline passes.
+    fn drain_split_sequence(&mut self) {
+        let deadline = std::time::Instant::now() + SGR_REASSEMBLY_WINDOW;
+        while std::time::Instant::now() < deadline {
+            match event::poll(deadline.saturating_duration_since(std::time::Instant::now())) {
+                Ok(true) => match event::read() {
+                    Ok(ev) => {
+                        use input::Feed;
+                        match self.guard.feed(&ev) {
+                            // Guard back to idle: sequence reassembled (or it
+                            // turned out not to be a mouse report). Stop draining.
+                            Feed::Accept if self.guard.is_idle() => break,
+                            Feed::Accept => {} // keep draining the tail
+                            Feed::Drop => {}   // expected: more fragments
+                        }
+                    }
+                    Err(_) => break,
+                },
+                _ => break, // timeout or error → give up, guard resets next event
+            }
+        }
+        // Ensure a fresh state for the next top-level event regardless of how
+        // this drain ended (timeout mid-sequence, parse error, etc.).
+        self.guard.reset();
     }
 }
 
@@ -310,6 +408,13 @@ pub(super) async fn run_app_loop(
     let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Event>();
     // Held until the loop returns; its `Drop` signals the reader thread to stop.
     let _input_reader = InputReader::spawn(input_tx)?;
+
+    // Symbol-layer SGR leakage backstop. The reader-thread reassembler
+    // (`SgrReassemblySink`) catches split mouse sequences at the source, but a
+    // fragment can still escape it on some terminals (browser xterm.js, very
+    // high-frequency trackpad inertia). This second guard drops any such stray
+    // `Char` event *before* `process_event` can insert it into the input line.
+    let mut sgr_guard = input::SgrLeakGuard::default();
 
     // Stage 3: carries "an input event was handled last iteration, so a frame
     // is due" across the loop boundary, since input is drained at the *end* of
@@ -1408,6 +1513,14 @@ pub(super) async fn run_app_loop(
                 app.completion_kind()
             };
             let in_envoy_view = app.in_envoy_view();
+            // SGR leakage backstop: drop any stray mouse-sequence fragment
+            // before it can reach `process_event` and be inserted as text.
+            // `continue` keeps the drain loop alive (events_drained stays set)
+            // without costing a redraw beyond the input-pending flag already
+            // raised for this iteration.
+            if matches!(sgr_guard.feed(&event), input::Feed::Drop) {
+                continue;
+            }
             let action = input::process_event(
                 event,
                 &mut app.input,
@@ -1432,6 +1545,10 @@ pub(super) async fn run_app_loop(
                         .then_some(app.custom_field),
                     editor_field: (app.active_modal == Modal::ModelEditor)
                         .then_some(app.editor_field),
+                    question_other_highlighted: app
+                        .question
+                        .as_ref()
+                        .is_some_and(|q| q.is_other_highlighted()),
                 },
                 &mut app.drag,
             );
@@ -1443,6 +1560,21 @@ pub(super) async fn run_app_loop(
 
             match action {
                 input::InputAction::None => {}
+                input::InputAction::TerminalResized => {
+                    // A resize is the prime trigger for crossterm splitting an
+                    // in-flight SGR mouse sequence across reads (issue #854).
+                    // Re-arm mouse capture so both crossterm's parser and the
+                    // terminal's mouse-tracking state start from a clean slate,
+                    // and force an immediate redraw to replace the stale frame
+                    // at the old geometry. The re-arm is best-effort: if the
+                    // terminal is mid-shutdown the write is ignored.
+                    use crossterm::event::EnableMouseCapture;
+                    let _ = crossterm::execute!(terminal.backend().writer(), EnableMouseCapture);
+                    sgr_guard.reset();
+                    // No need to set `frame_dirty` here: every drained event
+                    // already raised `input_redraw_pending`, which forces a
+                    // redraw on the very next frame at the new geometry.
+                }
                 input::InputAction::Quit => {
                     // Now reachable only via the `/exit` slash command (the bare
                     // `q` shortcut was removed to stop accidental first-key exits).
