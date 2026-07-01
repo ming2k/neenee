@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-07-02
+
+### Fixed
+
+- **Static and cross builds no longer fail on `openssl-sys`.** The release
+  workflow's `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-gnu` targets
+  failed with `Could not find directory of OpenSSL installation` because reqwest
+  was configured with the `native-tls` feature, which links against system
+  OpenSSL — unavailable under musl and absent in the aarch64 cross sysroot.
+  Switched reqwest to `rustls` + `webpki-roots`: pure-Rust TLS with a
+  compiled-in root certificate store, so the static and ARM64 binaries need no
+  system OpenSSL.
+
+### Changed
+
+- **reqwest now uses rustls, matching the documented TLS policy.** `deny.toml`
+  has always banned the `openssl` crate with the note "reqwest is configured
+  with rustls in the workspace," but the workspace actually pulled
+  `native-tls`/`openssl-sys` transitively — contradicting the ban. The
+  dependency graph is now openssl-free (`cargo tree -i openssl-sys` returns no
+  match), so the `deny.toml` ban is finally consistent with reality. This is
+  purely a TLS-implementation swap for outbound HTTPS; no application behavior
+  changes.
+
 ## [0.14.1] - 2026-07-02
 
 ### Fixed
@@ -943,7 +967,8 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.14.1...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.14.2...HEAD
+[0.14.2]: https://github.com/ming2k/neenee/releases/tag/v0.14.2
 [0.14.1]: https://github.com/ming2k/neenee/releases/tag/v0.14.1
 [0.14.0]: https://github.com/ming2k/neenee/releases/tag/v0.14.0
 [0.13.2]: https://github.com/ming2k/neenee/releases/tag/v0.13.2
