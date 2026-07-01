@@ -273,9 +273,6 @@ pub enum InputAction {
     /// Drill into the selected provider/model line in the TokenReport bill
     /// (the per-model detail). Bound to `Enter`.
     TokenReportActivate,
-    /// Drill into / back out of a section in the Debug inspector modal.
-    /// Bound to `Enter`.
-    DebugActivate,
     /// Delete the currently-selected session in the sessions picker.
     DeleteSelectedSession,
     /// Close any modal.
@@ -1059,7 +1056,6 @@ pub fn process_event(
                     super::Modal::ConfigLayout => InputAction::ConfigLayoutApply,
                     super::Modal::Activity => InputAction::CloseModal,
                     super::Modal::TokenReport => InputAction::TokenReportActivate,
-                    super::Modal::Debug => InputAction::DebugActivate,
                     super::Modal::None => {
                         if context.has_focused_target {
                             return InputAction::ActivateFocusedTarget;
@@ -1742,7 +1738,6 @@ pub fn process_event(
                     super::Modal::ModelEditor | super::Modal::InputInjection => InputAction::None,
                     super::Modal::Help => InputAction::ScrollUp,
                     super::Modal::TokenReport => InputAction::ModalUp,
-                    super::Modal::Debug => InputAction::ModalUp,
                     super::Modal::None => {
                         if context.has_focused_target {
                             InputAction::FocusPrevTarget
@@ -1799,7 +1794,6 @@ pub fn process_event(
                     super::Modal::ModelEditor | super::Modal::InputInjection => InputAction::None,
                     super::Modal::Help => InputAction::ScrollDown,
                     super::Modal::TokenReport => InputAction::ModalDown,
-                    super::Modal::Debug => InputAction::ModalDown,
                     super::Modal::None => {
                         if context.has_focused_target {
                             InputAction::FocusNextTarget

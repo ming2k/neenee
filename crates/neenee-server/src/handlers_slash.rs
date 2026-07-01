@@ -29,9 +29,9 @@ use neenee_agent::orchestration::{
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::skills::tools::{ListSkillsTool, UseSkillTool};
 use neenee_core::{
-    AgentNotice, AgentRequest, AgentResponse, CronExpr, DebugMessageInfo, DebugSnapshot,
-    DebugToolInfo, Message, NoticeKind, NoticeSeverity, NoticeSource, NoticeSurface, Provider,
-    Pursuit, Tool, RoundEvent, estimate_bytes, estimate_message_tokens, estimate_tokens,
+    AgentNotice, AgentRequest, AgentResponse, CronExpr, Message, NoticeKind, NoticeSeverity,
+    NoticeSource, NoticeSurface, Provider, Pursuit, Tool, RoundEvent, estimate_bytes,
+    estimate_tokens,
 };
 use neenee_store::{RepeatStore, config::Config, embedding, session::SessionStore};
 use neenee_tools::commands::{CustomCommand, expand_command};
@@ -1071,16 +1071,13 @@ pub async fn dispatch(
                 }
                 Some("context") => {
                     // /debug context — dev-only dry run. Snapshots the exact
-                    // request the next turn would send: the model-visible
-                    // message list (rebuilt head system message + auto-loaded
-                    // skills, mirroring `prepare_turn_messages`), the
-                    // model-visible tool schemas, provider/model identity,
-                    // context window, estimated token pressure, and the active
-                    // pursuit. NO provider call is made; nothing is mutated.
-                    // The full JSON record is persisted to the per-project
-                    // `debug/` dir, and a typed snapshot is shipped to the TUI
-                    // as `AgentResponse::DebugSnapshot` so it renders in a
-                    // dedicated inspector modal — not a flat transcript line.
+                    // request the next turn would send (rebuilt head system
+                    // message + auto-loaded skills, mirroring
+                    // `prepare_turn_messages`) and persists the full record to
+                    // the per-project `debug/` dir for offline inspection. NO
+                    // provider call is made; nothing is mutated. Reported to
+                    // the transcript as a single summary line — the on-disk
+                    // JSON is the source of truth for details.
                     let messages = {
                         let mut snapshot = history.lock().await.clone();
                         agent.prepare_turn_messages_debug(&mut snapshot);
@@ -1090,15 +1087,7 @@ pub async fn dispatch(
                     let model_name = agent.provider.model();
                     let window = active_context_window(agent);
                     let tokens = estimate_tokens(&messages);
-                    let tools: Vec<DebugToolInfo> = agent
-                        .installed_tools()
-                        .iter()
-                        .map(|tool| DebugToolInfo {
-                            name: tool.name().to_string(),
-                            description: tool.description().to_string(),
-                            variant: tool.variant().to_string(),
-                        })
-                        .collect();
+                    let estimated_bytes = estimate_bytes(&messages);
                     let pursuit = agent.get_pursuit();
                     let session_id = session.id().await;
                     let timestamp = chrono::Utc::now();
@@ -1107,50 +1096,21 @@ pub async fn dispatch(
                     } else {
                         0
                     };
+                    let n_tools = agent.installed_tools().len();
 
-                    // Per-message flattened rows for the inspector's Messages
-                    // section: index, role, hidden flag, per-message token
-                    // estimate, and a one-line summary.
-                    let message_infos: Vec<DebugMessageInfo> = messages
-                        .iter()
-                        .enumerate()
-                        .map(|(index, m)| DebugMessageInfo {
-                            index,
-                            role: format!("{:?}", m.role).to_lowercase(),
-                            hidden: m.hidden || m.origin.is_some(),
-                            tokens: estimate_message_tokens(m).max(0) as usize,
-                            summary: one_line_summary(&m.content),
-                        })
-                        .collect();
-
-                    let snapshot = DebugSnapshot {
-                        timestamp: timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                        file_path: String::new(), // filled after the file write below
-                        session_id: session_id.clone(),
-                        provider: provider_id.clone(),
-                        model: model_name.clone(),
-                        context_window_tokens: window,
-                        estimated_tokens: tokens,
-                        estimated_bytes: estimate_bytes(&messages),
-                        pressure_pct,
-                        pursuit: pursuit.clone(),
-                        tools: tools.clone(),
-                        messages: message_infos,
-                    };
-
-                    // Persist the full record (with the raw messages + tool
-                    // schemas) for offline inspection.
+                    // Persist the full record (raw messages + tool schemas)
+                    // for offline inspection.
                     let dir = neenee_store::paths::get().project_debug_dir(project_root_for_side);
                     let stamp = timestamp.format("%Y%m%d-%H%M%S%.3f");
                     let file = dir.join(format!("{stamp}_context.json"));
                     let record = serde_json::json!({
-                        "timestamp": snapshot.timestamp,
-                        "session_id": snapshot.session_id,
-                        "provider": snapshot.provider,
-                        "model": snapshot.model,
+                        "timestamp": timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        "session_id": session_id,
+                        "provider": provider_id,
+                        "model": model_name,
                         "context_window_tokens": window,
                         "estimated_tokens": tokens,
-                        "estimated_bytes": snapshot.estimated_bytes,
+                        "estimated_bytes": estimated_bytes,
                         "pressure_pct": pressure_pct,
                         "pursuit": pursuit,
                         "tools": agent
@@ -1180,18 +1140,18 @@ pub async fn dispatch(
                         }
                     }
 
-                    // Ship the typed snapshot (with the resolved path) to the
-                    // TUI so it opens the inspector modal.
-                    let snapshot = DebugSnapshot { file_path: file_path.clone(), ..snapshot };
-                    let _ = resp_tx.send(AgentResponse::DebugSnapshot(snapshot));
+                    let window_str = if window > 0 {
+                        format!("of {window} ({pressure_pct}%)")
+                    } else {
+                        "of unknown window".to_string()
+                    };
                     let _ = resp_tx.send(turn(
-                        &session_id,
+                        &session.id().await,
                         RoundEvent::Text(format!(
-                            "Context snapshot (dry run) — inspector opened. \
-                             ~{tokens} tokens, {n_msgs} message(s), {n_tools} tool(s). \
+                            "Context snapshot (dry run) — {provider_id}/{model_name}: \
+                             ~{tokens} tokens {window_str}, {} message(s), {n_tools} tool(s). \
                              Full JSON: {file_path}",
-                            n_msgs = messages.len(),
-                            n_tools = tools.len(),
+                            messages.len(),
                         )),
                     ));
                 }
@@ -1284,25 +1244,5 @@ pub async fn dispatch(
             )
             .await;
         }
-    }
-}
-
-/// One-line, length-capped summary of a message's content for the debug
-/// inspector's Messages list. Collapses control chars to spaces and truncates
-/// to `max_chars`, appending an ellipsis when truncated. Mirrors the
-/// `common::one_line` flattening the TUI uses for row text.
-fn one_line_summary(content: &str) -> String {
-    const MAX_CHARS: usize = 120;
-    let flat: String = content
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let flat = flat.trim();
-    if flat.chars().count() <= MAX_CHARS {
-        flat.to_string()
-    } else {
-        let mut out: String = flat.chars().take(MAX_CHARS).collect();
-        out.push('…');
-        out
     }
 }

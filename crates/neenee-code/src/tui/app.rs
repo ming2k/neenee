@@ -163,14 +163,6 @@ pub struct App {
     /// `true` when the TokenReport modal is drilled into a single provider/model
     /// detail (per-round line items + cache efficiency); `false` = the bill list.
     pub token_report_detail: bool,
-    /// Latest `/debug context` snapshot, read by the Debug inspector modal.
-    /// `None` until a snapshot is received from the harness.
-    pub debug_snapshot: Option<neenee_core::DebugSnapshot>,
-    /// Drilled-in section of the Debug inspector (`None` = the section list).
-    /// Holds the same `DebugDetail` / `DebugSection` types the renderer takes.
-    pub debug_detail: neenee_tui_view::render::DebugDetail,
-    /// Scroll offset of the Debug inspector body.
-    pub debug_scroll: usize,
     /// Screen rect of the `todos d/t` segment on the activity bar, so a click
     /// on it opens the Activity modal directly on the Todos section. `None`
     /// when no todos are shown (empty task list or bar hidden).

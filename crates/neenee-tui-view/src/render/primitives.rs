@@ -177,17 +177,6 @@ pub(super) fn modal_spec(modal: Modal) -> Option<ModalSpec> {
             header: true,
             footer: true,
         },
-        // Debug inspector: a read-only dry-run snapshot (model/context, tools,
-        // messages). Content-sized so the messages drill-in can grow tall.
-        Modal::Debug => ModalSpec {
-            width_percent: 74,
-            height: ModalHeight::Content {
-                min_rows: 12,
-                max_viewport_percent: 84,
-            },
-            header: true,
-            footer: true,
-        },
         // Config root: a short category list. Content-sized so a handful of
         // rows never shrinks it to a sliver.
         Modal::Config => ModalSpec {

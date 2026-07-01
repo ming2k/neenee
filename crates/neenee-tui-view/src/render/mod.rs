@@ -46,11 +46,11 @@ pub(super) use notice::draw_notice;
 pub use overlays::{
     ActivityModalView, CustomEditorView, draw_activity_modal, draw_add_model_editor,
     draw_armed_toast, draw_config_layout_modal, draw_config_modal, draw_config_nudge_modal,
-    draw_copy_toast, draw_custom_provider_editor, draw_debug_modal, draw_help_modal,
+    draw_copy_toast, draw_custom_provider_editor, draw_help_modal,
     draw_history_modal, draw_input_injection, draw_mcp_modal, draw_model_editor, draw_models_modal,
     draw_permission_sheet, draw_permissions_manager, draw_provider_template_chooser,
     draw_question_modal, draw_sessions_modal, draw_skills_modal, draw_token_report_modal,
-    draw_tools_modal, DebugDetail, DebugSection,
+    draw_tools_modal,
 };
 pub use primitives::recess_backdrop;
 use primitives::viewport_rect;

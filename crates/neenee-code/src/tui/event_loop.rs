@@ -103,13 +103,6 @@ pub(super) struct UiRuntime {
     /// round-trip completes. Each manager renders a lightweight placeholder
     /// while this is `None`.
     pub session_context: Arc<Mutex<Option<neenee_core::SessionContextSnapshot>>>,
-    /// Latest `/debug context` snapshot, mirrored from
-    /// `AgentResponse::DebugSnapshot`. The Debug inspector modal reads this
-    /// each frame. `None` until a snapshot lands.
-    pub debug_snapshot: Arc<Mutex<Option<neenee_core::DebugSnapshot>>>,
-    /// One-shot request to open the Debug inspector modal, set when a
-    /// `DebugSnapshot` arrives.
-    pub open_debug: Arc<AtomicBool>,
     /// Live nudge config snapshot, mirrored from
     /// `AgentResponse::NudgeConfigUpdated`. The `/config` modal reads this
     /// each frame; edits go out as `AgentRequest::UpdateNudgeConfig` and the
@@ -576,17 +569,6 @@ pub(super) async fn run_app_loop(
             {
                 app.active_modal = Modal::Sessions;
                 app.modal_index = 0;
-            }
-            // Debug inspector: mirror the latest snapshot and open the modal
-            // when `/debug context` shipped one.
-            app.debug_snapshot = runtime.debug_snapshot.lock().await.clone();
-            if runtime.open_debug.swap(false, Ordering::SeqCst)
-                && app.active_modal != Modal::Permission
-            {
-                app.active_modal = Modal::Debug;
-                app.modal_index = 0;
-                app.debug_detail = None;
-                app.debug_scroll = 0;
             }
         }
 
@@ -1315,16 +1297,6 @@ pub(super) async fn run_app_loop(
                             &app.theme,
                         ))
                     }
-                    Modal::Debug => app.debug_snapshot.as_ref().map(|snapshot| {
-                        render::draw_debug_modal(
-                            f,
-                            snapshot,
-                            app.modal_index.min(render::DebugSection::ALL.len().saturating_sub(1)),
-                            app.debug_detail,
-                            &mut app.debug_scroll,
-                            &app.theme,
-                        )
-                    }),
                     Modal::Tools => Some(render::draw_tools_modal(
                         f,
                         app.session_context.as_ref(),
@@ -2803,11 +2775,6 @@ pub(super) async fn run_app_loop(
                         // bill list; a second Esc closes the modal.
                         app.token_report_detail = false;
                         app.token_report_scroll = 0;
-                    } else if app.active_modal == Modal::Debug && app.debug_detail.is_some() {
-                        // First Esc returns from a section's detail to the
-                        // section list; a second Esc closes the modal.
-                        app.debug_detail = None;
-                        app.debug_scroll = 0;
                     } else {
                         // Most modals close straight to chat. The model editor
                         // instead steps back to the model picker, so a key entry is
@@ -2867,28 +2834,6 @@ pub(super) async fn run_app_loop(
                         if has_rows {
                             app.token_report_detail = true;
                             app.token_report_scroll = 0;
-                        }
-                    }
-                }
-                input::InputAction::DebugActivate => {
-                    // Enter in the Debug inspector: drill into the selected
-                    // section from the list, or return to the list from a
-                    // drilled-in section (acts like Esc-back).
-                    if app.active_modal == Modal::Debug {
-                        if app.debug_detail.is_some() {
-                            app.debug_detail = None;
-                            app.debug_scroll = 0;
-                        } else {
-                            let section = match app
-                                .modal_index
-                                .min(render::DebugSection::ALL.len().saturating_sub(1))
-                            {
-                                0 => render::DebugSection::Model,
-                                1 => render::DebugSection::Tools,
-                                _ => render::DebugSection::Messages,
-                            };
-                            app.debug_detail = Some(section);
-                            app.debug_scroll = 0;
                         }
                     }
                 }
@@ -3496,14 +3441,6 @@ pub(super) async fn run_app_loop(
                             app.modal_index = (app.modal_index + count - 1) % count;
                         }
                     }
-                    Modal::Debug => {
-                        if app.debug_detail.is_some() {
-                            app.debug_scroll = app.debug_scroll.saturating_sub(1);
-                        } else {
-                            let count = render::DebugSection::ALL.len();
-                            app.modal_index = (app.modal_index + count - 1) % count;
-                        }
-                    }
                     Modal::Help
                     | Modal::Question
                     | Modal::ModelEditor
@@ -3572,14 +3509,6 @@ pub(super) async fn run_app_loop(
                                 .map(|l| l.snapshot().rows.len())
                                 .unwrap_or(0)
                                 .max(1);
-                            app.modal_index = (app.modal_index + 1) % count;
-                        }
-                    }
-                    Modal::Debug => {
-                        if app.debug_detail.is_some() {
-                            app.debug_scroll = app.debug_scroll.saturating_add(1);
-                        } else {
-                            let count = render::DebugSection::ALL.len();
                             app.modal_index = (app.modal_index + 1) % count;
                         }
                     }

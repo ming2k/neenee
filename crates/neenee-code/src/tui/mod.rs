@@ -185,13 +185,6 @@ pub async fn run_tui(
     // (revoke / toggle). `None` until the first response lands.
     let session_context = Arc::new(Mutex::new(None::<SessionContextSnapshot>));
     let session_context_clone = session_context.clone();
-    // Latest `/debug context` snapshot (mirrored from
-    // `AgentResponse::DebugSnapshot`) + a one-shot flag to open the Debug
-    // inspector modal when a snapshot arrives.
-    let debug_snapshot = Arc::new(Mutex::new(None::<neenee_core::DebugSnapshot>));
-    let debug_snapshot_clone = debug_snapshot.clone();
-    let open_debug = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let open_debug_clone = open_debug.clone();
     // Live nudge config snapshot, mirrored from the harness whenever
     // `AgentResponse::NudgeConfigUpdated` arrives. The `/config` modal reads
     // this each frame to render the current thresholds and enabled state;
@@ -829,10 +822,6 @@ pub async fn run_tui(
                 AgentResponse::SessionContext(snapshot) => {
                     *session_context_clone.lock().await = Some(snapshot);
                 }
-                AgentResponse::DebugSnapshot(snapshot) => {
-                    *debug_snapshot_clone.lock().await = Some(snapshot);
-                    open_debug_clone.store(true, Ordering::SeqCst);
-                }
                 AgentResponse::Exit => {
                     should_quit_clone.store(true, Ordering::SeqCst);
                 }
@@ -895,9 +884,6 @@ pub async fn run_tui(
         token_ledger: Some(token_ledger),
         token_report_scroll: 0,
         token_report_detail: false,
-        debug_snapshot: None,
-        debug_detail: None,
-        debug_scroll: 0,
         todos_rect: None,
         modal_rect: None,
         sticky_summary_line: None,
@@ -1035,8 +1021,6 @@ pub async fn run_tui(
             sessions_overview,
             open_sessions,
             session_context,
-            debug_snapshot,
-            open_debug,
             nudge_config,
             todos,
             round_count,

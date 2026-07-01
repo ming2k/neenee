@@ -125,12 +125,6 @@ pub enum Modal {
     /// were filled in by the local char-class estimator. Opened by clicking
     /// the context meter in the hint bar. Esc / outside-click closes.
     TokenReport,
-    /// Debug inspector: a read-only dry-run snapshot of the request the next
-    /// turn would send (`/debug context`, dev-only). Three sections — model &
-    /// context, tools, messages — browsed with `↑/↓`; `Enter` drills into a
-    /// section's detail. Esc / outside-click closes. Opened by emitting
-    /// `AgentResponse::DebugSnapshot`.
-    Debug,
     /// Interactive-input injection panel (L3.5 β): shown when a `bash` command
     /// is classified interactive and the agent cannot supply its own input.
     /// Borrows the composer input line (like `Provider`/`ModelEditor`) for
@@ -210,7 +204,6 @@ impl Modal {
                 | Modal::HistorySearch
                 | Modal::Provider
                 | Modal::TokenReport
-                | Modal::Debug
         )
     }
 

@@ -284,12 +284,6 @@ pub enum AgentResponse {
     /// string so the modal re-renders from the authoritative state — the TOML
     /// write is the source of truth, not the TUI's optimistic local edit.
     TuiLayoutUpdated(String),
-    /// A structured dry-run snapshot from `/debug context` (dev-only). Opens
-    /// the read-only debug inspector modal with model/context, tools, and
-    /// messages sections. The same record is persisted to the per-project
-    /// `debug/` dir; this variant carries it to the TUI so it renders as a
-    /// dedicated surface instead of a flat transcript line.
-    DebugSnapshot(DebugSnapshot),
 }
 
 /// A user-visible notice emitted by the agent or harness.
@@ -921,57 +915,4 @@ pub struct McpServerInfo {
     pub disabled: bool,
     pub failure: Option<String>,
     pub tool_names: Vec<String>,
-}
-
-/// One model-visible tool, as captured by a `/debug context` dry run. The
-/// `name`/`description` are what the model sees in the function schema; the
-/// `variant` distinguishes implementations of the same capability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DebugToolInfo {
-    pub name: String,
-    pub description: String,
-    pub variant: String,
-}
-
-/// One message in a `/debug context` dry-run snapshot, flattened for the
-/// inspector modal. `role` is the role label; `tokens` is the char-class
-/// estimate for that single message; `summary` is a truncated head for the
-/// list view; `hidden` flags harness-injected (non-user/assistant-origin)
-/// messages so the inspector can dim them.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DebugMessageInfo {
-    pub index: usize,
-    pub role: String,
-    pub hidden: bool,
-    pub tokens: usize,
-    pub summary: String,
-}
-
-/// A structured dry-run of the request the next turn would send — captured
-/// by `/debug context` without calling the provider or mutating any state.
-/// Carried to the TUI by [`AgentResponse::DebugSnapshot`] so it can render a
-/// dedicated inspector modal (sections: model/context, tools, messages)
-/// instead of a flat transcript line. The matching JSON file is also written
-/// to the per-project `debug/` directory for offline inspection.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DebugSnapshot {
-    /// RFC3339 capture timestamp.
-    pub timestamp: String,
-    /// Project-relative path the full JSON snapshot was written to.
-    pub file_path: String,
-    pub session_id: String,
-    pub provider: String,
-    pub model: String,
-    /// Active model's context window in tokens; `0` means unknown.
-    pub context_window_tokens: usize,
-    /// Char-class token estimate of the full model-visible message list.
-    pub estimated_tokens: usize,
-    pub estimated_bytes: usize,
-    /// `estimated_tokens / context_window_tokens` as a rounded percent; `0`
-    /// when the window is unknown.
-    pub pressure_pct: u64,
-    /// `Some` when a pursuit is armed, with its objective.
-    pub pursuit: Option<Pursuit>,
-    pub tools: Vec<DebugToolInfo>,
-    pub messages: Vec<DebugMessageInfo>,
 }

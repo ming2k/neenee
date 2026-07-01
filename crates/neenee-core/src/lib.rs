@@ -80,7 +80,7 @@ pub use events::{
     NoticeSurface, ParentStatus, PermissionDecision, PermissionRequest, PermissionRuleInfo,
     ProviderModelInfo, ProviderPickerRow, ProviderPickerSnapshot, SessionContextSnapshot,
     SessionOverview, SkillInfo, ToolInfo, RoundEvent, UserQuestion, UserQuestionOption,
-    UserQuestionReply, UserQuestionRequest, DebugSnapshot, DebugToolInfo, DebugMessageInfo,
+    UserQuestionReply, UserQuestionRequest,
 };
 pub use hooks::{Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource};
 pub use mcp::{McpConnectionStatus, McpServerConfig};
