@@ -44,8 +44,8 @@ use crossterm::{
 };
 use neenee_core::{
     AgentRequest, AgentResponse, HarnessSnapshot, Message, ParentStatus, PermissionRequest,
-    ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot, SessionOverview, TodoList,
-    RoundEvent, UserQuestionRequest,
+    ProviderPickerSnapshot, Pursuit, Role, RoundEvent, SessionContextSnapshot, SessionOverview,
+    TodoList, UserQuestionRequest,
 };
 use neenee_tui::{Backend, Terminal};
 use std::{
@@ -346,10 +346,7 @@ pub async fn run_tui(
                             // so it can restore the composer for re-editing.
                             {
                                 let mut msgs = buf.write().await;
-                                if msgs
-                                    .last()
-                                    .is_some_and(|m| m.role == Role::User)
-                                {
+                                if msgs.last().is_some_and(|m| m.role == Role::User) {
                                     msgs.pop();
                                 }
                             }

@@ -97,7 +97,7 @@ async fn test_ws_round_trip() {
 
 #[tokio::test]
 async fn serde_shapes() {
-    use neenee_core::{AgentRequest, AgentResponse, ToolOutput, RoundEvent};
+    use neenee_core::{AgentRequest, AgentResponse, RoundEvent, ToolOutput};
     println!("--- serialization shapes ---");
 
     let resp = AgentResponse::Round {

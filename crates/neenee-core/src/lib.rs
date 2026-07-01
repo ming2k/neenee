@@ -21,7 +21,7 @@ pub mod cron;
 pub use cron::CronExpr;
 pub mod pursuits;
 pub mod repeat;
-pub use pursuits::{Pursuit, ThreadPursuit, TokenUsage, RoundOutcome, RoundTimer};
+pub use pursuits::{Pursuit, RoundOutcome, RoundTimer, ThreadPursuit, TokenUsage};
 pub use repeat::{DEFAULT_MAX_AGE_DAYS, RepeatJob};
 
 pub const PURSUIT_COMPLETE_MARKER: &str = "[NEENEE_PURSUIT_COMPLETE]";
@@ -78,8 +78,8 @@ pub use events::{
     AgentEvent, AgentNotice, AgentOp, AgentRequest, AgentResponse, EnvoyEvent, HarnessSnapshot,
     InputReply, InputRequest, McpServerInfo, ModelInfo, NoticeKind, NoticeSeverity, NoticeSource,
     NoticeSurface, ParentStatus, PermissionDecision, PermissionRequest, PermissionRuleInfo,
-    ProviderModelInfo, ProviderPickerRow, ProviderPickerSnapshot, SessionContextSnapshot,
-    SessionOverview, SkillInfo, ToolInfo, RoundEvent, UserQuestion, UserQuestionOption,
+    ProviderModelInfo, ProviderPickerRow, ProviderPickerSnapshot, RoundEvent,
+    SessionContextSnapshot, SessionOverview, SkillInfo, ToolInfo, UserQuestion, UserQuestionOption,
     UserQuestionReply, UserQuestionRequest,
 };
 pub use hooks::{Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource};

@@ -214,7 +214,10 @@ fn body_preview(text: &str) -> String {
     if truncated_chars > 0 {
         preview.push_str(&format!("…<{truncated_chars} more chars>"));
     }
-    preview = preview.replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
+    preview = preview
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
     preview
 }
 
@@ -307,14 +310,12 @@ mod tests {
         let preview = body_preview(&long);
         assert_eq!(
             preview.chars().count(),
-            DECODE_ERROR_BODY_PREVIEW + format!("…<{} more chars>", DECODE_ERROR_BODY_PREVIEW + 50)
-                .chars()
-                .count()
+            DECODE_ERROR_BODY_PREVIEW
+                + format!("…<{} more chars>", DECODE_ERROR_BODY_PREVIEW + 50)
+                    .chars()
+                    .count()
         );
-        assert!(preview.ends_with(&format!(
-            "…<{} more chars>",
-            DECODE_ERROR_BODY_PREVIEW + 50
-        )));
+        assert!(preview.ends_with(&format!("…<{} more chars>", DECODE_ERROR_BODY_PREVIEW + 50)));
     }
 
     #[test]

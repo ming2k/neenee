@@ -467,7 +467,10 @@ pub fn emit_pursuit_updated(
     session_id: &str,
     pursuit: &Pursuit,
 ) {
-    let _ = tx.send(turn(session_id, RoundEvent::PursuitUpdated(pursuit.clone())));
+    let _ = tx.send(turn(
+        session_id,
+        RoundEvent::PursuitUpdated(pursuit.clone()),
+    ));
 }
 
 #[derive(Clone)]
@@ -853,7 +856,10 @@ pub async fn execute_round(
         // the streaming turn). Only a non-hidden turn is unsentable: hidden
         // control prompts (pursuit continuation, verify nudge) are harness-
         // internal and should not be surfaced as editable user input.
-        if turn_history.last().is_some_and(|m| m.role == Role::User && !input.hidden) {
+        if turn_history
+            .last()
+            .is_some_and(|m| m.role == Role::User && !input.hidden)
+        {
             turn_history.pop();
             session.replace_messages(turn_history).await?;
             let _ = tx.send(turn(
@@ -1089,7 +1095,9 @@ pub fn relay_agent_event(
         AgentEvent::ToolStream { id, stream } => {
             turn(session_id, RoundEvent::ToolStream { id, stream })
         }
-        AgentEvent::PursuitUpdated(pursuit) => turn(session_id, RoundEvent::PursuitUpdated(pursuit)),
+        AgentEvent::PursuitUpdated(pursuit) => {
+            turn(session_id, RoundEvent::PursuitUpdated(pursuit))
+        }
         AgentEvent::TodosUpdated(todos) => turn(session_id, RoundEvent::TodosUpdated(todos)),
         AgentEvent::UnattendedChanged(enabled) => {
             turn(session_id, RoundEvent::UnattendedChanged(enabled))

@@ -1,5 +1,3 @@
-cargo-features = ["codegen-backend"]
-
 [workspace]
 members = [
     "crates/neenee-core",
@@ -65,5 +63,3 @@ unicode-segmentation = "1.12"
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"
-[profile.dev]
-codegen-backend = "cranelift"

@@ -407,7 +407,7 @@ impl TranscriptMessage {
         self
     }
 
-    /// Stamp the tool round this message belongs to (see [`TranscriptMessage::round`]).
+    /// Stamp the tool round this message belongs to (see [`TranscriptMessage::turn`]).
     pub fn with_turn(mut self, round: u64) -> Self {
         self.turn = Some(round);
         self

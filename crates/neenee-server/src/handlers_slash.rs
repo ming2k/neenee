@@ -30,7 +30,7 @@ use neenee_agent::skills::SkillRegistry;
 use neenee_agent::skills::tools::{ListSkillsTool, UseSkillTool};
 use neenee_core::{
     AgentNotice, AgentRequest, AgentResponse, CronExpr, Message, NoticeKind, NoticeSeverity,
-    NoticeSource, NoticeSurface, Provider, Pursuit, Tool, RoundEvent, estimate_bytes,
+    NoticeSource, NoticeSurface, Provider, Pursuit, RoundEvent, Tool, estimate_bytes,
     estimate_tokens,
 };
 use neenee_store::{RepeatStore, config::Config, embedding, session::SessionStore};
@@ -813,8 +813,10 @@ pub async fn dispatch(
                             j.prompt,
                         ));
                     }
-                    let _ =
-                        resp_tx.send(turn(&session.id().await, RoundEvent::Text(lines.join("\n"))));
+                    let _ = resp_tx.send(turn(
+                        &session.id().await,
+                        RoundEvent::Text(lines.join("\n")),
+                    ));
                 }
                 return;
             }

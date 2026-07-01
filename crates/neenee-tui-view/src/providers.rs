@@ -369,7 +369,12 @@ mod tests {
                 row(
                     "anthropic",
                     "Anthropic",
-                    &["claude-fable-5", "claude-sonnet-5", "claude-opus-4-8", "claude-sonnet-4-6"],
+                    &[
+                        "claude-fable-5",
+                        "claude-sonnet-5",
+                        "claude-opus-4-8",
+                        "claude-sonnet-4-6",
+                    ],
                     true,
                 ),
                 row("my-relay", "My Relay", &["glm-5.2", "glm-5.1"], false),

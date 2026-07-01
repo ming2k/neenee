@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-07-02
+
+### Fixed
+
+- **CI no longer forces nightly + Cranelift on every job.** A committed
+  `rust-toolchain.toml` (pinning `nightly` + `rustc-codegen-cranelift-preview`)
+  and a `[profile.dev] codegen-backend = "cranelift"` in the root `Cargo.toml`
+  were a local-dev speed-up that leaked into CI, breaking the entire pipeline:
+  the `fmt` and `clippy` jobs installed `stable` + their components but the
+  toolchain file overrode the active chain to a `nightly` that lacked
+  `rustfmt`/`clippy`; the `coverage` job's `-Cinstrument-coverage` is LLVM-only
+  and collided with Cranelift. Both files are removed — the Cranelift dev
+  preference stays available locally via `~/.cargo/config.toml`
+  (`[unstable] codegen-backend = true`). The codebase targets stable Rust (MSRV
+  1.95) and contains no nightly-only features, so CI now builds on `stable` as
+  every job already declared.
+
+- **Broken rustdoc intra-doc link.** `[TranscriptMessage::round]` pointed at a
+  field renamed to `turn` by the vocabulary swap; fixed to
+  `[TranscriptMessage::turn]`.
+
+### Changed
+
+- Reformatted several files with the current stable `rustfmt` (import
+  re-wrapping only; no logic change).
+
 ## [0.14.0] - 2026-07-02
 
 ### Added
@@ -917,7 +943,8 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/ming2k/neenee/releases/tag/v0.14.1
 [0.14.0]: https://github.com/ming2k/neenee/releases/tag/v0.14.0
 [0.13.2]: https://github.com/ming2k/neenee/releases/tag/v0.13.2
 [0.13.1]: https://github.com/ming2k/neenee/releases/tag/v0.13.1
