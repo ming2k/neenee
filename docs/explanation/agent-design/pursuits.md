@@ -2,7 +2,7 @@
 
 A **pursuit** is a durable, per-session objective. `/pursue <condition>` arms a
 **stop-gate** that keeps the agent working toward that objective until the
-model signals it is done — the autonomous "pursuit" is *within-turn*
+model signals it is done — the autonomous "pursuit" is *within-round*
 continuation, not an outer loop of whole turns. This page is the mechanism
 deep dive; for where it fits in the control plane see
 [Harness architecture](harness.md), and for the clock-driven counterpart see
@@ -10,19 +10,19 @@ the [`/repeat` cron scheduler](#the-repeat-cron-scheduler) section below.
 
 ## Why a dedicated primitive
 
-Without a pursuit, an agent turn is stateless: the model decides when a task is
+Without a pursuit, an agent round is stateless: the model decides when a task is
 done by emitting a final message. Long, multi-step work needs more than that:
 
 1. **Durable intent.** An objective stated up front must still be active after
    a restart. The pursuit persists in SQLite keyed by session id, so it survives
    `/resume` and process restarts.
-2. **A driver that does not give up early.** A single turn ends the moment the
+2. **A driver that does not give up early.** A single round ends the moment the
    model stops calling tools, which often happens long before a real objective
-   is achieved. The stop-gate refuses to let the turn end until the condition
+   is achieved. The stop-gate refuses to let the round end until the condition
    is met (or a safety cap is hit).
 3. **A trusted termination signal.** The driver needs a structured "the
    objective is genuinely done" signal it can trust, distinct from a routine
-   end-of-turn.
+   end-of-round.
 
 The pursuit carries **no status machine, no token/time budget, and no
 checklist**. Earlier revisions had all three; they were removed because the
@@ -55,17 +55,17 @@ mechanisms, not tool calls.
 | Role | Responsibility | Mechanism |
 |------|----------------|-----------|
 | **User** | Set the condition (entry) | `/pursue <condition>` slash command |
-| **Harness** | Drive + gate (continuation) | stop-gate re-injects the condition each round |
+| **Harness** | Drive + gate (continuation) | stop-gate re-injects the condition each turn |
 | **Model** | Signal completion (exit) | `[NEENEE_PURSUIT_COMPLETE]` marker |
 
-The active `objective` is surfaced in the system prompt each turn for
+The active `objective` is surfaced in the system prompt each round for
 visibility, but the system prompt no longer advertises any pursuit tools.
 
 ## The pursue stop-gate
 
 `/pursue <condition>` does three things: persists the condition as the active
-pursuit, **arms the stop-gate** on the agent, and drives one agent turn. The
-gate sits at the turn-loop exit. On each exit it consults
+pursuit, **arms the stop-gate** on the agent, and drives one agent round. The
+gate sits at the round-loop exit. On each exit it consults
 `pursuit_continuation`, which returns a continuation prompt when **all** of
 these hold:
 
@@ -75,19 +75,19 @@ these hold:
 - the safety cap has not been reached.
 
 When it returns a prompt, the gate injects the condition as a hidden
-user-role message, bumps its iteration counter, and forces another round
-instead of returning. The turn therefore runs to completion across many
+user-role message, bumps its iteration counter, and forces another turn
+instead of returning. The round therefore runs to completion across many
 rounds, re-injected each time the model tries to stop.
 
 ```text
 /pursue make all tests pass and CI green
-  └─ pursuit persisted; stop-gate armed; one turn begins
+  └─ pursuit persisted; stop-gate armed; one round begins
 
-  round 1: model edits code, then tries to end the turn
-    └─ gate: armed, pursuit incomplete, no completion signal → re-inject condition → round 2
+  turn 1: model edits code, then tries to end the round
+    └─ gate: armed, pursuit incomplete, no completion signal → re-inject condition → turn 2
 
-  round N: model verifies, emits [NEENEE_PURSUIT_COMPLETE]
-    └─ gate sees the completion signal → lets the turn end
+  turn N: model verifies, emits [NEENEE_PURSUIT_COMPLETE]
+    └─ gate sees the completion signal → lets the round end
     └─ orchestration finalizes: mark complete → is_complete = true
 ```
 
@@ -106,7 +106,7 @@ user-driven completion slash command for interactive turns.)
 ### Safety cap
 
 `MAX_PURSUIT_ITERATIONS` (50 rounds) bounds a pursuit that never signals
-completion. Hitting it disarms the gate and ends the turn with a notice, so a
+completion. Hitting it disarms the gate and ends the round with a notice, so a
 stuck pursuit cannot loop forever. The user can also interrupt at any time
 with `Esc` or `/pursue stop`.
 
@@ -119,7 +119,7 @@ deliberately distinct:
 | | `/pursue` | `/repeat` |
 |---|---|---|
 | Driver | a condition (stop-gate) | a clock (cron) |
-| Work unit | continuation within one turn | a fresh turn per tick |
+| Work unit | continuation within one round | a fresh round per tick |
 | Stops when | the condition is met / cap / interrupt | cancelled or auto-expired |
 | Persistence | pursuit in `pursuits.db` | jobs in `repeat.db` |
 
@@ -146,13 +146,13 @@ successful migration.
 
 A `PursuitCheckpoint` is written while a pursuit runs (status
 running/completed/interrupted/error) so `/session status` can report it, but a
-pursuit is a single turn — the checkpoint is observability, not a resumable
-multi-turn loop.
+pursuit is a single round — the checkpoint is observability, not a resumable
+multi-round loop.
 
 ## See also
 
 - [Harness architecture](harness.md) — the control plane, the stop-gate's
-  place in the turn loop, and how completion interleaves with retry and
+  place in the round loop, and how completion interleaves with retry and
   cancellation
 - [Built-in tools](../../reference/tools/index.md) — the pursuit interface has
   no model-facing tools; see [pursuits](../../reference/tools/pursuits.md)

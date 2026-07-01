@@ -86,10 +86,10 @@ other. Paths below are relative to each crate's `src/`.
 | `render/disclosure/mod.rs` | Disclosure module: draw orchestration, shared header rendering, sticky-pin tracking |
 | `render/disclosure/renderers.rs` | Tool-step, thinking (`draw_reasoning_trace`), and envoy step renderers |
 | `render/disclosure/state.rs` | Step state machine: `Disclosure`, `Interaction`, summary color/weight computation |
-| `render/layout/` | Transcript arrangement strategies: `compact`, `round_band` (selected by `[tui] transcript_layout`) |
+| `render/layout/` | Transcript arrangement strategies: `compact`, `turn_band` (selected by `[tui] transcript_layout`) |
 | `render/tools/` | Per-tool-step renderers (one file per tool: `bash`, `edit`, `read`, `grep`, `web`, `ask_user`, `read_image`, `diff`, `meta`, `fallback`) |
 | `render/composer.rs` | `draw_composer` (live input box), `INPUT_MSG_IDX` |
-| `render/chrome.rs` | `draw_activity_bar` / `ActivityBarHit` (breathing dot + turn/phase + pursuit + todos), `draw_hint_bar` / `HintBarView`, `draw_completion_menu` |
+| `render/chrome.rs` | `draw_activity_bar` / `ActivityBarHit` (breathing dot + round/phase + pursuit + todos), `draw_hint_bar` / `HintBarView`, `draw_completion_menu` |
 | `render/overlays/` | Modal subsystem (dir): one renderer per modal — `permission`, `provider`, `history`, `help`, `session`, `permissions_manager`, `activity`, `config`, `config_layout`, `config_nudge`, `mcp`, `skills`, `tools`, `token_report`, `toast` — plus shared `common` helpers |
 | `render/empty_state.rs` | Empty-transcript placeholder view; `parse_logo` |
 | `render/notice.rs` | Transient notice/toast rendering |

@@ -343,14 +343,14 @@ pub struct TranscriptMessage {
     /// Model id that produced this message, companion to [`TranscriptMessage::provider`].
     pub model: Option<String>,
     /// The tool-round this assistant-side message belongs to (1-indexed,
-    /// stamped from the harness's `RoundStarted` counter). Only tool steps
+    /// stamped from the harness's `TurnStarted` counter). Only tool steps
     /// carry it in practice. The renderer uses it to insert a round-boundary
     /// separator between adjacent collapsed tool steps that belong to
     /// different rounds, so two tool-only rounds never read as one batch.
     /// `None` (the default, and for restored sessions that predate the stamp)
     /// means "round unknown" — the renderer then preserves the legacy
     /// same-round flush stack.
-    pub round: Option<u64>,
+    pub turn: Option<u64>,
 }
 
 impl TranscriptMessage {
@@ -376,7 +376,7 @@ impl TranscriptMessage {
             origin: UserMessageOrigin::Chat,
             provider: None,
             model: None,
-            round: None,
+            turn: None,
         }
     }
 
@@ -408,8 +408,8 @@ impl TranscriptMessage {
     }
 
     /// Stamp the tool round this message belongs to (see [`TranscriptMessage::round`]).
-    pub fn with_round(mut self, round: u64) -> Self {
-        self.round = Some(round);
+    pub fn with_turn(mut self, round: u64) -> Self {
+        self.turn = Some(round);
         self
     }
 
@@ -451,7 +451,7 @@ impl TranscriptMessage {
             origin: UserMessageOrigin::Chat,
             provider: None,
             model: None,
-            round: None,
+            turn: None,
         };
         message.refresh_tool_step();
         message
@@ -747,7 +747,7 @@ impl TranscriptMessage {
             // TUI and routing the user's answer back down is the harness↔TUI
             // integration step that follows. Until then these are observed but
             // not rendered as a nested child step (the request still reaches
-            // the harness via the `TurnEvent::Envoy` envelope, so a future
+            // the harness via the `RoundEvent::Envoy` envelope, so a future
             // handler can attach without changing the event shape).
             EnvoyEvent::PermissionRequest(_)
             | EnvoyEvent::UserQuestionRequest(_)
@@ -933,7 +933,7 @@ impl TranscriptMessage {
             origin: UserMessageOrigin::Chat,
             provider: None,
             model: None,
-            round: None,
+            turn: None,
         };
         message.raw = content;
         message.blocks = parse_blocks(&message.raw);
@@ -965,7 +965,7 @@ impl TranscriptMessage {
             origin: UserMessageOrigin::Chat,
             provider: None,
             model: None,
-            round: None,
+            turn: None,
         }
     }
 

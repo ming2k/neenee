@@ -4,7 +4,7 @@
 //! `PursuitService` facade — lives in `neenee_store::pursuits`. This module
 //! keeps only the domain shapes a frontend needs without pulling in SQLite:
 //! `Pursuit` (runtime view), `ThreadPursuit` (persisted view), `TokenUsage`,
-//! `TurnOutcome`, and the per-turn `TurnTimer`. The pursuit lifecycle is driven
+//! `RoundOutcome`, and the per-turn `RoundTimer`. The pursuit lifecycle is driven
 //! by the `/pursue` slash command, the in-turn stop-gate, and the
 //! `[NEENEE_PURSUIT_COMPLETE]` marker; there are no model-facing pursuit tools
 //! (ADR-0031).
@@ -71,7 +71,7 @@ pub struct TokenUsage {
 
 /// Outcome returned by the agent after running one turn.
 #[derive(Debug, Clone)]
-pub struct TurnOutcome {
+pub struct RoundOutcome {
     pub message: crate::Message,
     pub token_usage: TokenUsage,
     pub duration_ms: u64,
@@ -80,17 +80,17 @@ pub struct TurnOutcome {
 /// Turn-level elapsed-time keeper. Kept after ADR-0010 even though
 /// pursuit-level time accounting is gone, because the harness still uses it
 /// for per-turn telemetry (e.g. plan-progress timestamps).
-pub struct TurnTimer {
+pub struct RoundTimer {
     start: Instant,
 }
 
-impl Default for TurnTimer {
+impl Default for RoundTimer {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl TurnTimer {
+impl RoundTimer {
     pub fn new() -> Self {
         Self {
             start: Instant::now(),

@@ -22,14 +22,14 @@
 //! # Strategies
 //! - [`compact::Compact`] — the original flush-stack behavior, preserved
 //!   verbatim. The default.
-//! - [`round_band::RoundBand`] — option C: each tool round is grouped under a
+//! - [`turn_band::TurnBand`] — option C: each tool round is grouped under a
 //!   labelled header (`◆ round N · model · K calls`).
 //!
 //! New strategies are added by implementing the trait and wiring a match arm
 //! in [`Strategy::build`].
 
 pub mod compact;
-pub mod round_band;
+pub mod turn_band;
 
 use neenee_tui::{Frame, Rect};
 
@@ -50,7 +50,7 @@ use crate::render::design::MESSAGE_GAP_ROWS;
 pub enum Strategy {
     #[default]
     Compact,
-    RoundBand,
+    TurnBand,
 }
 
 impl Strategy {
@@ -59,7 +59,7 @@ impl Strategy {
     /// erroring, so a typo never blocks startup.
     pub fn from_config(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "round_band" | "roundband" | "round" | "bands" | "grouped" => Self::RoundBand,
+            "turn_band" | "roundband" | "round" | "bands" | "grouped" => Self::TurnBand,
             "compact" | "flush" | "default" | "" => Self::Compact,
             _ => Self::Compact,
         }
@@ -69,7 +69,7 @@ impl Strategy {
     pub fn build(self) -> Box<dyn TranscriptLayout> {
         match self {
             Self::Compact => Box::new(compact::Compact),
-            Self::RoundBand => Box::new(round_band::RoundBand),
+            Self::TurnBand => Box::new(turn_band::TurnBand),
         }
     }
 }

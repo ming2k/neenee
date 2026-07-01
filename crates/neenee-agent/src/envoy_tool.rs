@@ -438,7 +438,7 @@ impl EnvoyTool {
                 let status = if tool_round == 0 {
                     "waiting for model".to_string()
                 } else {
-                    format!("waiting for model · round {}", tool_round + 1)
+                    format!("waiting for model · turn {}", tool_round + 1)
                 };
                 on_event(neenee_core::EnvoyEvent::Activity(status));
             }

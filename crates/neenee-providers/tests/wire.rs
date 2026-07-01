@@ -177,6 +177,37 @@ async fn openai_chat_omits_auth_header_when_api_key_is_empty() {
 }
 
 #[tokio::test]
+async fn openai_chat_decode_failure_embeds_raw_body() {
+    // A gateway/CDN interstitial returns 200 with an HTML body instead of JSON.
+    // reqwest's own `.json()` would surface only "error decoding response body"
+    // with no hint of the cause; the decode helper must embed the raw text.
+    let mut server = Server::new_async().await;
+    let url = format!("{}/v1/chat/completions", server.url());
+    let _mock = server
+        .mock("POST", "/v1/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "text/html")
+        .with_body("<html><body>502 Bad Gateway</body></html>")
+        .create_async()
+        .await;
+
+    let provider = OpenAiCompatProvider::with_base_url("k".to_string(), "m".to_string(), &url);
+    let error = provider
+        .chat(vec![Message::new(Role::User, "hi")])
+        .await
+        .expect_err("non-JSON 200 must surface as a decode error");
+
+    assert!(
+        error.contains("error decoding response body"),
+        "should name the decode failure: {error}"
+    );
+    assert!(
+        error.contains("502 Bad Gateway"),
+        "should embed the raw body preview so the cause is diagnosable: {error}"
+    );
+}
+
+#[tokio::test]
 async fn openai_stream_parses_text_reasoning_and_tool_call_deltas() {
     let mut server = Server::new_async().await;
     let url = format!("{}/v1/chat/completions", server.url());
@@ -506,6 +537,85 @@ async fn factory_publishes_thinking_without_output_config() {
         },
         api_key: "k".into(),
         model: "claude-opus-4-8".into(),
+    };
+    assert_factory_body(
+        channel,
+        json!({ "thinking": { "type": "adaptive", "display": "summarized" } }),
+    )
+    .await;
+}
+
+/// Sonnet 5 thinking is ON by default when the `thinking` field is omitted, so
+/// an explicit opt-OUT (`ThinkingMode::Off`) MUST publish
+/// `thinking:{type:"disabled"}`. Omitting the field would leave the model
+/// reasoning and billing against the user's ADR-0046 opt-out intent — the
+/// regression this variant exists to catch.
+#[tokio::test]
+async fn sonnet5_opt_out_emits_explicit_disabled() {
+    let channel = Channel {
+        id: "claude-sonnet-5".into(),
+        label: "Sonnet 5".into(),
+        transport: Transport::Anthropic {
+            base_url: String::new(),
+            user_agent: "ua".into(),
+            effort: Some(Effort::High),
+            thinking: Some(ThinkingMode::Off),
+        },
+        api_key: "k".into(),
+        model: "claude-sonnet-5".into(),
+    };
+    assert_factory_body(
+        channel,
+        json!({
+            "thinking": { "type": "disabled" },
+            "output_config": { "effort": "high" }
+        }),
+    )
+    .await;
+}
+
+/// Sonnet 5 opt-IN publishes adaptive thinking (not `disabled`), and honors the
+/// full effort range — here `xhigh`, which Sonnet 4.6 would reject.
+#[tokio::test]
+async fn sonnet5_opt_in_publishes_adaptive_and_full_effort_range() {
+    let channel = Channel {
+        id: "claude-sonnet-5".into(),
+        label: "Sonnet 5".into(),
+        transport: Transport::Anthropic {
+            base_url: String::new(),
+            user_agent: "ua".into(),
+            effort: Some(Effort::Xhigh),
+            thinking: Some(ThinkingMode::Adaptive),
+        },
+        api_key: "k".into(),
+        model: "claude-sonnet-5".into(),
+    };
+    assert_factory_body(
+        channel,
+        json!({
+            "thinking": { "type": "adaptive", "display": "summarized" },
+            "output_config": { "effort": "xhigh" }
+        }),
+    )
+    .await;
+}
+
+/// Fable 5 thinking is ALWAYS ON and cannot be disabled; even an explicit
+/// `ThinkingMode::Off` override is a no-op on the wire, which still publishes
+/// `thinking:{type:"adaptive"}`.
+#[tokio::test]
+async fn fable5_always_on_thinking_ignores_off_override() {
+    let channel = Channel {
+        id: "claude-fable-5".into(),
+        label: "Fable 5".into(),
+        transport: Transport::Anthropic {
+            base_url: String::new(),
+            user_agent: "ua".into(),
+            effort: None,
+            thinking: Some(ThinkingMode::Off),
+        },
+        api_key: "k".into(),
+        model: "claude-fable-5".into(),
     };
     assert_factory_body(
         channel,

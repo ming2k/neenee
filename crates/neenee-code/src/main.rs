@@ -5,7 +5,7 @@ use neenee_agent::orchestration::{
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, EnvoyTool};
-use neenee_core::{AgentRequest, AgentResponse, CHARS_PER_TOKEN, EXPLORE, Provider, TurnEvent};
+use neenee_core::{AgentRequest, AgentResponse, CHARS_PER_TOKEN, EXPLORE, Provider, RoundEvent};
 use neenee_store::{
     RepeatStore,
     config::Config,
@@ -225,10 +225,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder.provide(skills_registry.clone());
         builder.provide(embedding_store.clone());
         builder.provide(session.clone());
-        // The abort tool needs a handle to signal the harness (request
-        // channel). Provided by type so `neenee-tools` stays free of a CLI
-        // dependency. See `abort.rs`.
-        builder.provide(req_tx.clone());
         builder.build()
     };
     let mut toolset: neenee_core::ToolSet = neenee_core::collect_toolset(&tool_ctx);
@@ -298,7 +294,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent.set_unattended(true);
         let _ = resp_tx.send(turn(
             &session.id().await,
-            TurnEvent::Text(
+            RoundEvent::Text(
                 "Unattended ON: write tools will execute without permission prompts.".to_string(),
             ),
         ));
@@ -341,7 +337,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // review is on-demand via `/review`, so it has no config to seed.) All
     // default to sensible values when the table is absent, so this is a no-op
     // for the common case — the nudge config defaults to disabled.
-    agent.set_hard_stop_rounds(config.principal.hard_stop_rounds);
+    agent.set_hard_stop_turns(config.principal.hard_stop_turns);
     agent.set_nudge_config(config.principal.nudge);
     agent.set_allow_model_stdin(config.principal.allow_model_stdin);
 

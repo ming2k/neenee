@@ -18,7 +18,7 @@ pub enum AgentRequest {
         decision: PermissionDecision,
         /// Full-duplex (ADR-0029): when the reply targets a permission
         /// request surfaced by a *envoy* (carried up as a
-        /// [`TurnEvent::Envoy`] / [`EnvoyEvent::PermissionRequest`]),
+        /// [`RoundEvent::Envoy`] / [`EnvoyEvent::PermissionRequest`]),
         /// this is the parent tool-call id the request was nested under. The
         /// harness looks up the live child's `crate::EnvoyHandle` in the
         /// task registry by this id and resolves its parked oneshot directly.
@@ -199,15 +199,6 @@ pub enum AgentRequest {
     /// `/sessions`), and emits [`AgentResponse::SideViewClosed`]. Sent by
     /// the TUI when the user presses `Esc` / `Ctrl+C` inside the side view.
     ExitSideView,
-    /// Abort the current operation and exit the program gracefully. Sent by
-    /// the model-facing `abort` tool when it detects a stuck state — a loop,
-    /// a dangerous operation, or a dead end it cannot recover from. The
-    /// harness cancels any in-flight turn (same path as `Interrupt`) and
-    /// replies [`AgentResponse::Exit`], so the normal graceful-exit path runs
-    /// (session save + `SessionEnd` hooks) before the process ends and its
-    /// background tasks die with it. This is the model's self-initiated
-    /// emergency escape hatch, not a user action.
-    Abort,
     /// Update the nudge configuration at runtime (from the `/config` modal).
     /// The harness writes the new config to `config.toml`, calls
     /// `Agent::set_nudge_config`, and replies with
@@ -221,7 +212,7 @@ pub enum AgentRequest {
     /// transcript_layout` and replies with [`AgentResponse::TuiLayoutUpdated`]
     /// carrying the persisted string so the modal re-renders from the
     /// authoritative state. The value is a raw config string ("compact" /
-    /// "round_band"); interpretation into a [`crate`] layout `Strategy`
+    /// "turn_band"); interpretation into a [`crate`] layout `Strategy`
     /// happens in the renderer, keeping the core free of render types.
     UpdateTuiLayout(String),
 }
@@ -237,9 +228,9 @@ pub enum AgentResponse {
     /// Global (non-session-scoped) responses — command replies, modal
     /// snapshots, provider switches — stay as dedicated top-level variants so
     /// they are handled once, regardless of which view is focused.
-    Turn {
+    Round {
         session_id: String,
-        event: TurnEvent,
+        event: RoundEvent,
     },
     /// Coarse status of the primary session, surfaced to a side view's banner
     /// while the user is inside a `/btw`. Emitted by the session registry's
@@ -293,12 +284,18 @@ pub enum AgentResponse {
     /// string so the modal re-renders from the authoritative state — the TOML
     /// write is the source of truth, not the TUI's optimistic local edit.
     TuiLayoutUpdated(String),
+    /// A structured dry-run snapshot from `/debug context` (dev-only). Opens
+    /// the read-only debug inspector modal with model/context, tools, and
+    /// messages sections. The same record is persisted to the per-project
+    /// `debug/` dir; this variant carries it to the TUI so it renders as a
+    /// dedicated surface instead of a flat transcript line.
+    DebugSnapshot(DebugSnapshot),
 }
 
 /// A user-visible notice emitted by the agent or harness.
 ///
-/// This is distinct from state-sync events such as [`TurnEvent::TodosUpdated`]
-/// and blocking interaction events such as [`TurnEvent::PermissionRequest`]:
+/// This is distinct from state-sync events such as [`RoundEvent::TodosUpdated`]
+/// and blocking interaction events such as [`RoundEvent::PermissionRequest`]:
 /// those events update UI state or require a reply, while a notice means
 /// "surface this fact to the user".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,13 +388,13 @@ pub enum NoticeSource {
 }
 
 /// The session-scoped shapes a single turn/stream emits, carried under an
-/// [`AgentResponse::Turn`] envelope (ADR-0017). Splitting these off
+/// [`AgentResponse::Round`] envelope (ADR-0017). Splitting these off
 /// `AgentResponse` makes "which session does this belong to" a first-class
 /// question: every turn event — whether from the primary or a `/btw` side —
 /// arrives tagged with its `session_id`, and global/command responses stay
 /// top-level.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TurnEvent {
+pub enum RoundEvent {
     Notice(AgentNotice),
     Text(String),
     /// Turn-level error (e.g. a provider failure mid-turn). Distinct from the
@@ -405,7 +402,7 @@ pub enum TurnEvent {
     /// session's transcript and is therefore carried under the [`Turn`]
     /// envelope.
     ///
-    /// [`Turn`]: AgentResponse::Turn
+    /// [`Turn`]: AgentResponse::Round
     Error(String),
     ToolCall {
         id: String,
@@ -471,8 +468,8 @@ pub enum TurnEvent {
     /// `turn N · round M · <status>` without parsing the round back out of the
     /// `Activity` status string. Emitted just before the matching
     /// `Activity("waiting for model")`.
-    RoundStarted {
-        round: usize,
+    TurnStarted {
+        turn: usize,
     },
     StreamStart,
     StreamDelta(String),
@@ -744,7 +741,7 @@ pub enum AgentEvent {
     /// when the turn is healthy — the TUI treats empty as "clear any prior
     /// alert"). Surfaced as a non-modal banner so the user can decide whether
     /// to interrupt; it does not abort the turn unless an opt-in
-    /// `hard_stop_rounds` budget is configured.
+    /// `hard_stop_turns` budget is configured.
     SessionReview {
         alert: String,
     },
@@ -924,4 +921,57 @@ pub struct McpServerInfo {
     pub disabled: bool,
     pub failure: Option<String>,
     pub tool_names: Vec<String>,
+}
+
+/// One model-visible tool, as captured by a `/debug context` dry run. The
+/// `name`/`description` are what the model sees in the function schema; the
+/// `variant` distinguishes implementations of the same capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugToolInfo {
+    pub name: String,
+    pub description: String,
+    pub variant: String,
+}
+
+/// One message in a `/debug context` dry-run snapshot, flattened for the
+/// inspector modal. `role` is the role label; `tokens` is the char-class
+/// estimate for that single message; `summary` is a truncated head for the
+/// list view; `hidden` flags harness-injected (non-user/assistant-origin)
+/// messages so the inspector can dim them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugMessageInfo {
+    pub index: usize,
+    pub role: String,
+    pub hidden: bool,
+    pub tokens: usize,
+    pub summary: String,
+}
+
+/// A structured dry-run of the request the next turn would send — captured
+/// by `/debug context` without calling the provider or mutating any state.
+/// Carried to the TUI by [`AgentResponse::DebugSnapshot`] so it can render a
+/// dedicated inspector modal (sections: model/context, tools, messages)
+/// instead of a flat transcript line. The matching JSON file is also written
+/// to the per-project `debug/` directory for offline inspection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DebugSnapshot {
+    /// RFC3339 capture timestamp.
+    pub timestamp: String,
+    /// Project-relative path the full JSON snapshot was written to.
+    pub file_path: String,
+    pub session_id: String,
+    pub provider: String,
+    pub model: String,
+    /// Active model's context window in tokens; `0` means unknown.
+    pub context_window_tokens: usize,
+    /// Char-class token estimate of the full model-visible message list.
+    pub estimated_tokens: usize,
+    pub estimated_bytes: usize,
+    /// `estimated_tokens / context_window_tokens` as a rounded percent; `0`
+    /// when the window is unknown.
+    pub pressure_pct: u64,
+    /// `Some` when a pursuit is armed, with its objective.
+    pub pursuit: Option<Pursuit>,
+    pub tools: Vec<DebugToolInfo>,
+    pub messages: Vec<DebugMessageInfo>,
 }

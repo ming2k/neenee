@@ -90,6 +90,15 @@ pub enum ThinkingSupport {
     /// the `thinking` object is emitted regardless of the user's on/off choice.
     /// (Claude Fable 5 / Mythos 5.)
     AnthropicAdaptiveAlwaysOn,
+    /// Anthropic adaptive thinking that is **on by default when the `thinking`
+    /// field is omitted**, but CAN be disabled by sending `{type:"disabled"}`.
+    /// This is the distinguishing trait: unlike [`Self::AnthropicAdaptive`]
+    /// (omitting disables thinking) and [`Self::AnthropicAdaptiveAlwaysOn`]
+    /// (it can never be disabled), a request-build layer for this variant MUST
+    /// emit an explicit `thinking:{type:"disabled"}` when the user opts OUT —
+    /// otherwise the model silently reasons and burns tokens. When opted in,
+    /// emit `{type:"adaptive"}`. (Claude Sonnet 5.)
+    AnthropicAdaptiveOnByDefault,
     /// Anthropic **manual** extended thinking: emit
     /// `thinking: {type:"enabled", budget_tokens: N}` (no `effort`). Opt-in.
     /// (Claude Haiku 4.5; Opus·Sonnet 4.5; Claude 4 / 4.1.)

@@ -82,7 +82,7 @@ pub(super) fn transcript_messages_from_core(
     // Tool-round counter for restored assistant turns. Each `Role::Assistant`
     // message is one model request = one round, so the counter increments per
     // assistant message and stamps its tool steps — mirroring the live path's
-    // `RoundStarted`-driven stamp so resumed sessions get the same round-
+    // `TurnStarted`-driven stamp so resumed sessions get the same round-
     // boundary separators between adjacent tool-only rounds.
     let mut restored_round: u64 = 0;
     // Index of every still-unfinished tool step, queued per tool name. A tool
@@ -125,7 +125,7 @@ pub(super) fn transcript_messages_from_core(
                     );
                     step.provider = provider.clone();
                     step.model = model.clone();
-                    step.round = Some(restored_round);
+                    step.turn = Some(restored_round);
                     pending_steps
                         .entry(call.name)
                         .or_default()

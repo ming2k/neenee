@@ -7,7 +7,7 @@
 //! `pursuit_service`, `config`, …) so the body reads exactly as it did inline.
 
 use neenee_agent::Agent;
-use neenee_agent::orchestration::TurnInput;
+use neenee_agent::orchestration::RoundInput;
 use neenee_core::{AgentResponse, Message};
 use neenee_store::{config::Config, session::SessionStore};
 use std::sync::Arc;
@@ -44,7 +44,7 @@ pub async fn chat(
         generation_clone,
         resp_tx,
         config,
-        TurnInput {
+        RoundInput {
             prompt: text,
             hidden: false,
             display_prompt: None,

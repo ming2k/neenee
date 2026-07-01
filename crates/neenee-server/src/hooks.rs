@@ -254,11 +254,11 @@ fn context_to_json(ctx: &HookContext) -> String {
         HookEvent::Stop { last_message } => {
             value["last_message"] = json!(last_message);
         }
-        HookEvent::Round {
-            round,
+        HookEvent::Turn {
+            turn,
             consecutive_readonly,
         } => {
-            value["round"] = json!(round);
+            value["turn"] = json!(turn);
             value["consecutive_readonly"] = json!(consecutive_readonly);
         }
         HookEvent::PreCompact | HookEvent::PostCompact => {}
@@ -277,7 +277,7 @@ fn event_name(event: &HookEvent) -> &'static str {
         HookEvent::Stop { .. } => "Stop",
         HookEvent::PreCompact => "PreCompact",
         HookEvent::PostCompact => "PostCompact",
-        HookEvent::Round { .. } => "Round",
+        HookEvent::Turn { .. } => "Turn",
     }
 }
 

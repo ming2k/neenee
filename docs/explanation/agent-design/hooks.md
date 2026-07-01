@@ -2,7 +2,7 @@
 
 A **lifecycle hook** is a user-configured action that runs automatically at a
 specific point in the agent's lifecycle — before a tool call, after the model
-tries to end a turn, when a session starts, before context is compacted. Hooks
+tries to end a round, when a session starts, before context is compacted. Hooks
 let external practices (format-on-edit, a CI gate before completion, a
 session-start notification, a "keep the test files" instruction folded into
 compaction) attach to the agent as configuration, without touching the core
@@ -10,7 +10,7 @@ loop.
 
 This page is the design deep dive. For where hooks sit in the control plane
 see [Harness architecture](harness.md); for the events they share with other
-mechanisms see [Tool rounds](turns-and-rounds.md), [Pursuits](pursuits.md), and
+mechanisms see [Tool rounds](rounds-and-turns.md), [Pursuits](pursuits.md), and
 [Context compaction](context-compaction.md). For the configuration fields see
 [Configuration Reference](../../reference/configuration.md#hooks); for the
 decision history see [ADR-0025](../../adr/0025-lifecycle-event-hooks.md).
@@ -31,9 +31,9 @@ happens, run Y."
 
 The distinguishing constraint is that hooks are **user-programmable
 lifecycle points**, not a second copy of the engines that already drive the
-agent. Context pressure, round counting, and the clock are each already owned
+agent. Context pressure, turn counting, and the clock are each already owned
 by a purpose-built mechanism — `CompactionPolicy` decides when to relieve
-pressure, `/pursue` drives within-turn continuation, `/repeat` drives
+pressure, `/pursue` drives within-round continuation, `/repeat` drives
 clock-based work. Hooks do not re-expose those as configurable axes; they
 expose the lifecycle events those engines fire on.
 
@@ -49,12 +49,12 @@ Hooks fire on **lifecycle events**, grouped by cadence into four families:
 
 What a hook is *allowed to do* is not a knob the user picks — it is implied by
 the event it fires on. A `PreToolUse` hook may block the call; a `Stop` hook
-may force another round; a `PostToolUse` or `UserPromptSubmit` hook may
+may force another turn; a `PostToolUse` or `UserPromptSubmit` hook may
 inject context the model then sees; the rest only observe. The user writes
 "on `Stop`, run this script"; the system already knows a `Stop` hook's result
 is a continue-or-stop decision.
 
-This is deliberate. A design that exposed the context threshold, the round
+This is deliberate. A design that exposed the context threshold, the turn
 count, and the clock as further hook axes would duplicate the engines that
 already govern them and muddy two clean concerns — "what the harness does
 under pressure or on a schedule" versus "what the user adds on a lifecycle
@@ -70,7 +70,7 @@ event." neenee keeps the first internal and exposes only the second.
 | `PreToolUse` | Before a tool call runs | Deny (block the call) |
 | `PostToolUse` | After a tool call succeeds | Inject context |
 | `PostToolUseFailure` | After a tool call fails | Inject context |
-| `Stop` | The model tries to end the turn | Deny (force another round, feeding the reason back) or inject |
+| `Stop` | The model tries to end the round | Deny (force another turn, feeding the reason back) or inject |
 | `PreCompact` | Before a summarizing compaction | Inject (folded into the summary prompt) |
 | `PostCompact` | After a compaction completes | Observe |
 | `Round` | Once per tool round (ADR-0030) | Inject only — **`Deny` is ignored**, so a round-count hook cannot become a de-facto round cap. Carries the read-only-round streak so a hook can target exploration-without-progress. The harness declares no built-in threshold here; users opt in. |
@@ -136,14 +136,14 @@ tool call declared
   ├─ [Harness]      permission broker (Write / Execute tools)
   ├─              tool executes
   └─ [Hooks]      PostToolUse (success) | PostToolUseFailure (error)
-                        └─ inject context? → hidden message on the next round
+                        └─ inject context? → hidden message on the next turn
 ```
 
-At turn end, the `Stop` hook composes with the `/pursue` stop-gate. The
+At round end, the `Stop` hook composes with the `/pursue` stop-gate. The
 pursuit gate is queried first (it owns its safety cap and completion signal);
-only when the pursuit lets the turn stop do `Stop` hooks get a vote. The turn
+only when the pursuit lets the round stop do `Stop` hooks get a vote. The round
 ends only when **both** agree to stop. A `Stop` hook that denies forces one
-more round with its reason fed back as a hidden user message — the same shape
+more turn with its reason fed back as a hidden user message — the same shape
 a pursuit uses, just driven by an external script instead of a condition.
 
 Around compaction, a `PreCompact` hook's injected context is folded into the
@@ -172,10 +172,10 @@ influence what the model summarizes), and `PostCompact` observes the result.
 
 - [Harness architecture](harness.md) — the control plane the hooks attach to,
   and the permission broker a `PreToolUse` hook precedes
-- [Tool rounds](turns-and-rounds.md) — the tool-call round trip the per-tool events
+- [Tool rounds](rounds-and-turns.md) — the tool-call turn trip the per-tool events
   bracket
 - [Pursuits](pursuits.md) — the `/pursue` stop-gate a `Stop` hook composes
-  with at turn end
+  with at round end
 - [Context compaction](context-compaction.md) — the summarization the
   `PreCompact` / `PostCompact` events surround
 - [Configuration Reference](../../reference/configuration.md#hooks) — the
@@ -183,7 +183,8 @@ influence what the model summarizes), and `PostCompact` observes the result.
 - [ADR-0025](../../adr/0025-lifecycle-event-hooks.md) — the decision to
   adopt a single event axis with implicit capability, and the multi-axis
   design rejected along the way
-- [ADR-0030](../../adr/0030-early-loop-intervention-and-round-hook.md) — the
-  `Deny`-forbidden `Round` event that partially supersedes ADR-0025's exclusion
-  of round-count (the in-loop review nudge it also added was later reworked into
-  the deterministic guard of [ADR-0034](../../adr/0034-range-aware-pruning-and-deterministic-read-loop-guard.md))
+- [ADR-0030](../../adr/0030-early-loop-intervention-and-turn-hook.md) — the
+  `Deny`-forbidden `Round` event (called `Turn` when the ADR was written) that
+  partially supersedes ADR-0025's exclusion of loop-count (the in-loop review
+  nudge it also added was later reworked into the deterministic guard of
+  [ADR-0034](../../adr/0034-range-aware-pruning-and-deterministic-read-loop-guard.md))

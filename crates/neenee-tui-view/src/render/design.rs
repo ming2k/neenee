@@ -159,3 +159,22 @@ pub(super) const CODE_BAND_GUTTER_MIN_WIDTH: usize = 2;
 /// into either edge.
 #[cfg(test)]
 pub(super) const PANEL_BAR_INSET: u16 = 1;
+
+// ── Minimum terminal size ────────────────────────────────────────────────
+// Below this geometry the layout math (footer split, composer height, code
+// band gutters) would underflow or produce an unusable UI. Instead of drawing
+// garbage — or panicking deep in a subtraction chain — `draw_transcript`
+// short-circuits and shows a single centered notice telling the user how large
+// the terminal must be, hiding everything else. The values are the smallest
+// width/height at which the normal footer (status bar + composer + hint bar)
+// plus a one-line transcript row all fit.
+
+/// Minimum terminal width (columns) for a usable layout. The footer needs the
+/// horizontal inset on both sides plus the composer prompt prefix and right
+/// pad; a narrower terminal cannot render even the input box legibly.
+pub(super) const MIN_TERMINAL_COLS: u16 = 40;
+
+/// Minimum terminal height (rows) for a usable layout. Accounts for the
+/// viewport's top/bottom margin (2 rows), the footer chrome (status bar +
+/// composer minimum + hint bar = 5 rows), and at least one transcript row.
+pub(super) const MIN_TERMINAL_ROWS: u16 = 12;

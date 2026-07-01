@@ -18,7 +18,7 @@ lets a project add capabilities without forking neenee: a database query tool,
 a private API client, a custom linter. The integration is deliberately narrow:
 
 1. **Same execution path.** An MCP tool shares the `Tool` trait, the
-   permission broker, the [tool-round](turns-and-rounds.md) loop, and the TUI step
+   permission broker, the [tool-turn](rounds-and-turns.md) loop, and the TUI step
    renderer with every built-in. The agent does not treat MCP tools specially.
 2. **Local stdio only.** neenee speaks JSON-RPC over a spawned child's
    stdin/stdout. No HTTP, no remote servers — the server runs under the user's

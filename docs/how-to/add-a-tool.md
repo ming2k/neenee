@@ -3,7 +3,7 @@
 This guide walks through implementing a new tool that the agent can call. It
 assumes familiarity with the `Tool` trait. For the existing tool catalog,
 see [Built-in tools](../reference/tools/index.md). For the protocol the model uses
-to call tools, see [Tool rounds](../explanation/agent-design/turns-and-rounds.md).
+to call tools, see [Tool rounds](../explanation/agent-design/rounds-and-turns.md).
 
 Most built-in tools live in the `neenee-tools` crate. Pick the module that
 matches the tool's domain: filesystem and web tools go in
@@ -133,7 +133,7 @@ fn permission_scope(&self, arguments: &str) -> String {
 `json_string` (`crates/neenee-tools/src/lib.rs`) extracts a JSON field
 from the arguments string and falls back to `"*"`. Existing scopes: file
 tools use the `path` argument, `bash` uses the full `command` text,
-`create_project` uses `{path}/{name}`. Pick a scope that distinguishes
+`init_config` uses the `path` argument. Pick a scope that distinguishes
 meaningfully different invocations but is stable across retries of the same
 invocation.
 
@@ -239,13 +239,13 @@ Update these surfaces in the same change:
 - Add a row to the table in [Built-in tools](../reference/tools/index.md).
 - If the tool introduces a new permission scope shape, document it under
   the tool's parameter table.
-- If the tool changes how the harness behaves on a turn, update
+- If the tool changes how the harness behaves on a round, update
   [Harness architecture](../explanation/agent-design/harness.md).
 
 ## See also
 
 - [Built-in tools](../reference/tools/index.md) — existing tool catalog
-- [Tool rounds](../explanation/agent-design/turns-and-rounds.md) — schema injection and
+- [Tool rounds](../explanation/agent-design/rounds-and-turns.md) — schema injection and
   fallback mechanics
 - [Provider capabilities](../explanation/provider-capabilities.md) — why
   tool support varies across providers

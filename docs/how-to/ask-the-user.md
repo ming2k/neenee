@@ -1,7 +1,7 @@
 # How to ask the user a question during a task
 
 Use the `ask_user` tool when the agent needs a decision, clarification, or
-preference from the user before continuing. The tool blocks the turn, renders a
+preference from the user before continuing. The tool blocks the round, renders a
 modal in the TUI, and returns the selected option labels to the model.
 
 ## When to use `ask_user`

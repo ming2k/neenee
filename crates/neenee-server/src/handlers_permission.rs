@@ -35,7 +35,7 @@ pub async fn interrupt(
     // the in-flight turn unwinds. The work itself stops the moment the token
     // is cancelled below, but the turn task's own terminal "idle" snapshot is
     // only sent at the very end of its cleanup, which is gated behind
-    // persistence fsyncs (`session.replace_messages` inside `execute_turn`,
+    // persistence fsyncs (`session.replace_messages` inside `execute_round`,
     // then `set_checkpoint` in `start_pursuit`). Without this eager snapshot
     // the activity bar keeps showing the stale "pursue"/"running" loop_status
     // — and a climbing elapsed timer — for the whole disk-write window, which
@@ -45,7 +45,7 @@ pub async fn interrupt(
     // turn starts, both snapshots are "idle"; if one does, it bumps
     // generation itself and its "running" snapshot supersedes, while the
     // stale task's generation-guarded idle send is skipped
-    // (`orchestration.rs` start_pursuit / start_interactive_turn /
+    // (`orchestration.rs` start_pursuit / start_interactive_round /
     // run_shell_command).
     send_harness_state(resp_tx, &session.id().await, agent, "idle");
 

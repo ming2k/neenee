@@ -10,12 +10,12 @@ breathing-dot liveness anchor into one click-to-open bar.
  ● making edits · ⟴ refactor auth module · todos 2/5 · 23s
 ```
 
-The bar surfaces what the user most wants to know mid-turn: the **live
+The bar surfaces what the user most wants to know mid-round: the **live
 status** (lead, brand + italic), an optional **pursuit badge** (`⟴ <objective>`,
 shown only while a pursuit is armed), **todos progress** (`todos d/t`,
 shown only when a non-empty task list exists), and **elapsed** time (the only
 live counter). Segments are omitted when there is nothing to report, so a
-plain turn reads simply:
+plain round reads simply:
 
 ```text
  ● making edits · 3s
@@ -48,21 +48,21 @@ moves. See [ADR-0008](../../adr/0008-single-breathing-anchor.md).
 | Condition | Visible? |
 |-----------|----------|
 | Idle | No |
-| Streaming assistant text ("responding") | Yes — the bar stays up across the whole turn lifecycle, sustaining the breathing-dot liveness anchor (ADR-0008) through the longest phase |
+| Streaming assistant text ("responding") | Yes — the bar stays up across the whole round lifecycle, sustaining the breathing-dot liveness anchor (ADR-0008) through the longest phase |
 | Running tool / queued / waiting | Yes |
 | Overlay modal open | No |
 
-The bar persists from turn start (user submits) through every phase —
+The bar persists from round start (user submits) through every phase —
 `queued`, `responding`, tool work, `finalizing response` — and only
 disappears when the harness returns to idle. This keeps the breathing dot
-in peripheral vision for the entire active turn and avoids a layout shift
+in peripheral vision for the entire active round and avoids a layout shift
 at the streaming boundary.
 
 ## Turn and round
 
 The bar no longer shows the turn/round counters; they live in the Activity
 modal (click the bar) as a detail line `turn N · round M · <model> ·
-<elapsed>`. See [Turns and rounds](../../explanation/agent-design/turns-and-rounds.md)
+<elapsed>`. See [Rounds and turns](../../explanation/agent-design/rounds-and-turns.md)
 for the full concept; in short:
 
 | Counter | Meaning |
@@ -92,6 +92,6 @@ session.
 
 `draw_activity_bar` in `render/chrome.rs`. Glyph from `spinner_glyph`;
 luminance sweep from `breathing_color` in the same module. Spinner phase
-driven by `app.spinner_tick` incremented once per frame. Turn and round
-values are mirrored from `AgentResponse::RoundStarted` and the harness turn
+driven by `app.spinner_tick` incremented once per frame. Round and turn
+values are mirrored from `AgentResponse::RoundStarted` and the harness round
 counter by the response listener in `tui/mod.rs`.

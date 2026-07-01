@@ -1,6 +1,6 @@
 # Prompt and Message Assembly
 
-A model never sees a raw transcript. Every turn the harness composes what the
+A model never sees a raw transcript. Every round the harness composes what the
 model actually reads from three independent channels, each with its own rules
 for what it carries, when it is rebuilt, and how it reaches the provider. This
 page is the integrating view of those channels. The individual mechanisms each
@@ -8,8 +8,8 @@ has its own deep-dive; this page ties them together and covers the discipline
 that makes the whole assembly auditable.
 
 For the request-scoped context that consumes the assembled prompt, see
-[Model context](model-context.md). For the turn that sends that context, see
-[Harness architecture](harness.md) and [Turns and rounds](turns-and-rounds.md).
+[Model context](model-context.md). For the round that sends that context, see
+[Harness architecture](harness.md) and [Rounds and turns](rounds-and-turns.md).
 
 ## The three channels
 
@@ -18,12 +18,12 @@ in parallel:
 
 | Channel | What it carries | Rebuilt when | How it reaches the model |
 |---------|-----------------|--------------|--------------------------|
-| **System** | Identity, neutral behavior, and live context (pursuit, skills catalog) | Every turn, from scratch | A single head system message |
-| **User** | Genuine user input, plus harness-injected steering notes | Appended as the turn proceeds | User-role messages |
-| **Tools** | Each tool's name, description, and parameter schema | Every turn | The native function-calling `tools` field, outside the conversation |
+| **System** | Identity, neutral behavior, and live context (pursuit, skills catalog) | Every round, from scratch | A single head system message |
+| **User** | Genuine user input, plus harness-injected steering notes | Appended as the round proceeds | User-role messages |
+| **Tools** | Each tool's name, description, and parameter schema | Every round | The native function-calling `tools` field, outside the conversation |
 
 Keeping the channels separate is the central design idea. The system message is
-*recomposed* each turn from live state, so it can never drift stale. The user
+*recomposed* each round from live state, so it can never drift stale. The user
 channel carries both real input and harness steering, but never the two
 confused — every harness insertion is stamped so a persisted transcript can say
 exactly what was injected and why. Tools are advertised through the provider's
@@ -31,7 +31,7 @@ own schema surface, not described in prose, so the two never contradict.
 
 ## The system message
 
-The system message is rebuilt from scratch at the start of every turn, not
+The system message is rebuilt from scratch at the start of every round, not
 stored. It is assembled in a fixed reading order, each section present only when
 its precondition holds:
 
@@ -77,16 +77,16 @@ role's persona plus the neutral sections. See
 
 ## Conditional injections
 
-The system message is not the only place the harness shapes behavior. As a turn
+The system message is not the only place the harness shapes behavior. As a round
 unfolds across rounds, the harness injects user-role messages under specific
 conditions to steer the model. Each injection is a deliberate intervention with
 a defined trigger, and each is recorded so the transcript remains faithful.
 
 | Injection | Trigger | Intent |
 |-----------|---------|--------|
-| **Pursuit continuation** | The `/pursue` stop-gate forces another round because the pursuit is not yet complete | Re-anchor the model on the objective and define what counts as completion; the prompt marks the objective as untrusted user data and sets rigorous completion-audit criteria so the model does not declare victory prematurely |
+| **Pursuit continuation** | The `/pursue` stop-gate forces another turn because the pursuit is not yet complete | Re-anchor the model on the objective and define what counts as completion; the prompt marks the objective as untrusted user data and sets rigorous completion-audit criteria so the model does not declare victory prematurely |
 | **Pursuit objective updated** | The user edits the active pursuit mid-flight | Tell the model the objective changed and to drop work that only served the old one |
-| **Read-loop nudge** | The deterministic guard detects a repeated identical read (a stuck anchor or a two-page thrash) | Break the self-reinforcing context: the model is told the repeated read returns identical content and must change course; it escalates once if the loop persists, then stays silent and lets the hard backstops (`Esc`, `hard_stop_rounds`, `abort`) take over |
+| **Read-loop nudge** | The deterministic guard detects a repeated identical read (a stuck anchor or a two-page thrash) | Break the self-reinforcing context: the model is told the repeated read returns identical content and must change course; it escalates once if the loop persists, then stays silent and lets the hard backstops (`Esc`, `hard_stop_turns`, `abort`) take over |
 | **Compaction checkpoint** | Context pressure triggers compaction | Wrap a model-written summary of archived turns under a stable header that flags it as durable context, not a new request. See [Context compaction](context-compaction.md) |
 | **Implicit skill** | The latest user message mentions a skill name | Load the skill body so the model behaves as if it had explicitly invoked it. See [Skills](skills.md) |
 | **Hook output** | A configured lifecycle hook returns injected context | Let user practice (lint failures, CI gates, reminders) re-enter the conversation. See [Lifecycle hooks](hooks.md) |
@@ -131,8 +131,8 @@ answer "what was injected, when, and why" without fragile string-sniffing.
 Tools are advertised to the model through the provider's native function-calling
 surface — the `tools` field alongside the message history — not described in the
 system prompt. Each tool declares three things: a name, a description, and a
-JSON schema for its parameters. This declaration is request-scoped: every round,
-including the round that carries tool results back upstream, re-sends the full
+JSON schema for its parameters. This declaration is request-scoped: every turn,
+including the turn that carries tool results back upstream, re-sends the full
 schema set. The provider is stateless across turns.
 
 Two consequences follow from keeping tools out of the prompt:
@@ -161,7 +161,7 @@ replies, and tool results carry no origin; only harness injections do.
 The classifier is deliberately closed: adding an injection path requires adding
 a variant, and exhaustiveness checking forces every injection site to be
 stamped. The stamp survives serialization, so a session saved to disk and
-reopened later reconstructs the exact live turn. This is the contract that lets
+reopened later reconstructs the exact live round. This is the contract that lets
 resume, replay, and audit all trust the transcript: nothing was silently
 inserted, and everything that was inserted is identifiable.
 
@@ -176,12 +176,12 @@ and composition stay in lockstep rather than drifting into two vocabularies.
   sections become declarative `PromptRegistry` entries keyed by
   `InjectionKind`, replacing the ad-hoc `format!`/`push_str` assembly. The
   same change fixed a latent defect where an envoy system message
-  pre-seeded before the turn loop was clobbered on round 1.
+  pre-seeded before the round loop was clobbered on turn 1.
 - [ADR-0034](../../adr/0034-range-aware-pruning-and-deterministic-read-loop-guard.md)
   — the deterministic read-loop guard and why a frequency window replaces a
   consecutive counter.
-- [ADR-0030](../../adr/0030-early-loop-intervention-and-round-hook.md) — early
-  loop intervention, including the round-hook axis that later fed hook-driven
+- [ADR-0030](../../adr/0030-early-loop-intervention-and-turn-hook.md) — early
+  loop intervention, including the turn-hook axis that later fed hook-driven
   injection.
 - [ADR-0019](../../adr/0019-model-relative-context-compaction.md) — the
   compaction checkpoint as durable context.

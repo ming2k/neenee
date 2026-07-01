@@ -8,7 +8,7 @@ rest of the agent design reads as their consequence rather than a series of
 independent choices.
 
 For the byte-level wire shape, see [Request flow](request-flow.md). For the
-round trip of a single tool call, see [Tool rounds](agent-design/turns-and-rounds.md).
+turn trip of a single tool call, see [Tool rounds](agent-design/rounds-and-turns.md).
 For why providers differ on which primitives they implement, see
 [Provider capabilities](provider-capabilities.md).
 
@@ -24,7 +24,7 @@ hard guarantee. There is no numeric weight attached to a role; the gradient is
 a property of the training distribution:
 
 - `system` is treated as durable framing — persona, global rules, the highest
-  authority, hard to override in a single turn.
+  authority, hard to override in a single round.
 - `user` is treated as a request to respond to or act on.
 - `assistant` is the model's own prior output, retained as memory but
   superseded by newer information.
@@ -38,9 +38,9 @@ neenee exploits this gradient to layer intent by durability:
 
 The pursuit lives in the system prompt so the model treats it as a durable rule
 rather than a one-off request it can consider finished. Loop control prompts
-live in `user` so the model treats them as the current turn's work. Reversing
+live in `user` so the model treats them as the current round's work. Reversing
 the two would fail: a pursuit in `user` reads as a request that is done after one
-turn; a control prompt in `system` dilutes the authority a system message
+round; a control prompt in `system` dilutes the authority a system message
 carries. See [Pursuits](agent-design/pursuits.md).
 
 There is one attribute orthogonal to role: **visibility**. A message can be
@@ -53,17 +53,17 @@ has no notion of it.
 
 ## The API is stateless; the messages array is the only memory
 
-Every round of the agent loop is one independent HTTP request. The provider
+Every turn of the agent loop is one independent HTTP request. The provider
 remembers nothing between requests. What the model "knows" about prior turns
-is entirely a function of the messages array neenee re-sends each round:
+is entirely a function of the messages array neenee re-sends each turn:
 
 ```text
-round 1:  [system, user]
-round 2:  [system, user, assistant(tool_calls), tool(result)]
-round 3:  [system, user, assistant, tool, assistant(tool_calls), tool, ...]
+turn 1:  [system, user]
+turn 2:  [system, user, assistant(tool_calls), tool(result)]
+turn 3:  [system, user, assistant, tool, assistant(tool_calls), tool, ...]
 ```
 
-The array grows monotonically until the turn ends. This single fact forces
+The array grows monotonically until the round ends. This single fact forces
 most of the harness machinery:
 
 - **The array is bounded**, so long work needs
@@ -71,7 +71,7 @@ most of the harness machinery:
   window — summarizing or pruning old messages so the array stays finite.
 - **Cross-session intent cannot live in the array**, so a durable objective
   needs a [pursuit](agent-design/pursuits.md) persisted outside the request, then
-  re-injected into the system prompt each round.
+  re-injected into the system prompt each turn.
 - **A tool's effect is invisible to the model unless it re-enters the array**,
   so every tool result is appended as a `tool` message before the next
   request. The model cannot "remember" running a command; it can only read the
@@ -79,14 +79,14 @@ most of the harness machinery:
 
 The agent is therefore a stateless API plus client-managed external state —
 the messages array, the persisted pursuit and session, the in-memory checklist.
-Nothing else carries across a round.
+Nothing else carries across a turn.
 
 ## Function calling is the ReAct loop, not an implementation detail
 
-A tool-using turn is not a neenee loop grafted onto a chat API. The loop *is*
+A tool-using round is not a neenee loop grafted onto a chat API. The loop *is*
 the protocol. Function calling — the `tools` array, the assistant's
 `tool_calls`, and the `tool` message that carries a `tool_call_id` back — is
-part of the OpenAI contract, and one round of the agent loop maps onto it
+part of the OpenAI contract, and one turn of the agent loop maps onto it
 exactly:
 
 ```text
@@ -94,15 +94,15 @@ client sends: messages + tools
 model replies: assistant message carrying tool_calls
 client executes the tools locally
 client appends: tool messages (one per call, each with tool_call_id)
-client re-sends: messages + tools   ← next round
+client re-sends: messages + tools   ← next turn
 ```
 
 The loop ends when the model replies with no `tool_calls` — and that is also
 protocol, not policy. neenee adds guards on top (a repeated-call limit, a
 periodic session-review diagnostic), but the loop's existence and termination
 condition come from the contract. See
-[ADR-0009](../adr/0009-uncapped-agentic-loop.md) for why the round count was
-left uncapped to match this, and [ADR-0016](../adr/0016-session-review-over-round-counting.md)
+[ADR-0009](../adr/0009-uncapped-agentic-loop.md) for why the turn count was
+left uncapped to match this, and [ADR-0016](../adr/0016-session-review-over-turn-counting.md)
 for the diagnostic that watches uncapped turns.
 
 Two protocol constraints shape the harness:
@@ -133,13 +133,13 @@ arbitrary:
 - **The hidden control channel exists** because the `user` role drives action,
   and visibility is separable from role.
 
-The rest of this section — harness, turns and rounds, pursuits, tool rounds — is
+The rest of this section — harness, rounds and turns, pursuits, tool turns — is
 each a specialization of one or more of these primitives.
 
 ## See also
 
 - [Request flow](request-flow.md) — the wire-level shape of each transaction
-- [Tool rounds](agent-design/turns-and-rounds.md) — the round trip of one tool call
+- [Tool rounds](agent-design/rounds-and-turns.md) — the turn trip of one tool call
 - [Provider capabilities](provider-capabilities.md) — which providers implement
   which primitives
 - [Pursuits](agent-design/pursuits.md) — the pursuit as a system-prompt anchor

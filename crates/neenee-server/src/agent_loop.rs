@@ -188,15 +188,6 @@ pub async fn run(mut req_rx: mpsc::UnboundedReceiver<AgentRequest>, h: Harness) 
             AgentRequest::Interrupt => {
                 crate::handlers_permission::interrupt(&agent, &session, &resp_tx, &ctt_clone).await;
             }
-            // The model's self-initiated escape hatch (the `abort` tool).
-            // Same teardown as a user interrupt — cancel the in-flight turn —
-            // then signal the TUI to exit gracefully, so the session is saved
-            // and SessionEnd hooks fire before the process ends. The turn
-            // executing the `abort` tool call is itself cancelled by this.
-            AgentRequest::Abort => {
-                crate::handlers_permission::interrupt(&agent, &session, &resp_tx, &ctt_clone).await;
-                let _ = resp_tx.send(AgentResponse::Exit);
-            }
             AgentRequest::PermissionReply {
                 request_id,
                 decision,

@@ -1,6 +1,6 @@
 # Skills tools
 
-Skills are not tools, but three small tools manage them, and a fourth searches
+Skills are not tools, but two small tools manage them, and a third searches
 session history. All are `Read` and bypass the permission broker.
 
 ## `use_skill`
@@ -21,15 +21,6 @@ into the conversation.
 `ListSkillsTool` lists every available skill with its scope, description, and
 enabled state. Useful for seeing what the agent can load before calling
 `use_skill`.
-
-## `reload_skills`
-
-| Parameter | Type | Required | Notes |
-|-----------|------|----------|-------|
-| — | — | — | No parameters |
-
-`ReloadSkillsTool` rescans local skill directories and refetches remote skill
-repositories. Call it after adding, removing, or editing skill files.
 
 ## `search_history`
 

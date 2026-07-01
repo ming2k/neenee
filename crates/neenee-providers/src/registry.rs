@@ -33,6 +33,8 @@ const ANTHROPIC_MODEL_MAX_TOKENS: &[(&str, u32)] = &[
     // context); Haiku 4.5 supports 64K. Cap there so long agent turns are not
     // truncated by the provider's flat 8192 default.
     ("claude-opus-4-8", 128000),
+    ("claude-fable-5", 128000),
+    ("claude-sonnet-5", 128000),
     ("claude-sonnet-4-6", 128000),
     ("claude-haiku-4-5-20251001", 64000),
 ];
@@ -122,6 +124,8 @@ pub fn openai_provider_spec(id: &str) -> Option<&'static OpenAiProviderSpec> {
 /// Each id exists in the model registry, so its metadata (context window, output
 /// limit, capabilities) resolves there.
 pub const ANTHROPIC_BUILTIN_MODELS: &[&str] = &[
+    "claude-fable-5",
+    "claude-sonnet-5",
     "claude-opus-4-8",
     "claude-sonnet-4-6",
     "claude-haiku-4-5-20251001",

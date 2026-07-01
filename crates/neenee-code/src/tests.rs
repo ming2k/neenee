@@ -7,11 +7,11 @@
 
 use neenee_agent::Agent;
 use neenee_agent::orchestration::{
-    ContextProjectionSettings, ProxyProvider, TurnContext, TurnInput, apply_jitter_ms,
-    execute_turn, retry_delay_ms,
+    ContextProjectionSettings, ProxyProvider, RoundContext, RoundInput, apply_jitter_ms,
+    execute_round, retry_delay_ms,
 };
 use neenee_agent::skills::SkillRegistry;
-use neenee_core::{AgentResponse, Message, Provider, ProviderStreamEvent, TurnEvent, async_trait};
+use neenee_core::{AgentResponse, Message, Provider, ProviderStreamEvent, RoundEvent, async_trait};
 use neenee_providers::MockProvider;
 use neenee_store::session::SessionStore;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -53,11 +53,9 @@ fn registry_collects_all_self_registered_tools() {
         "ask_user",
         "webfetch",
         "websearch",
-        "create_project",
         "init_config",
         "use_skill",
         "list_skills",
-        "reload_skills",
     ] {
         assert!(
             names.contains(expected),
@@ -216,8 +214,8 @@ async fn turn_retries_transient_provider_failure_before_tool_activity() {
     ));
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let completed = execute_turn(
-        TurnContext {
+    let completed = execute_round(
+        RoundContext {
             agent,
             history: history.clone(),
             tx,
@@ -235,7 +233,7 @@ async fn turn_retries_transient_provider_failure_before_tool_activity() {
             retry_base_ms: 1,
             retry_max_ms: 10,
         },
-        TurnInput {
+        RoundInput {
             prompt: "work".to_string(),
             hidden: false,
             display_prompt: None,
@@ -257,8 +255,8 @@ async fn turn_retries_transient_provider_failure_before_tool_activity() {
     let activities = responses
         .iter()
         .filter_map(|response| match response {
-            AgentResponse::Turn {
-                event: TurnEvent::Activity(status),
+            AgentResponse::Round {
+                event: RoundEvent::Activity(status),
                 ..
             } => Some(status.as_str()),
             _ => None,
@@ -275,8 +273,8 @@ async fn turn_retries_transient_provider_failure_before_tool_activity() {
     assert_eq!(activities.last(), Some(&"saving response"));
     assert!(responses.iter().any(|response| matches!(
         response,
-        AgentResponse::Turn {
-            event: TurnEvent::RetryScheduled {
+        AgentResponse::Round {
+            event: RoundEvent::RetryScheduled {
                 attempt: 2,
                 max_attempts: 3,
                 ..
@@ -286,8 +284,8 @@ async fn turn_retries_transient_provider_failure_before_tool_activity() {
     )));
     assert!(responses.iter().any(|response| matches!(
         response,
-        AgentResponse::Turn {
-            event: TurnEvent::StreamDiscard,
+        AgentResponse::Round {
+            event: RoundEvent::StreamDiscard,
             ..
         }
     )));
@@ -307,8 +305,8 @@ async fn turn_does_not_retry_after_tool_activity() {
     ));
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let error = execute_turn(
-        TurnContext {
+    let error = execute_round(
+        RoundContext {
             agent,
             history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             tx,
@@ -326,7 +324,7 @@ async fn turn_does_not_retry_after_tool_activity() {
             retry_base_ms: 1,
             retry_max_ms: 10,
         },
-        TurnInput {
+        RoundInput {
             prompt: "work".to_string(),
             hidden: false,
             display_prompt: None,
@@ -348,8 +346,8 @@ async fn turn_does_not_retry_after_tool_activity() {
     assert!(
         !std::iter::from_fn(|| rx.try_recv().ok()).any(|response| matches!(
             response,
-            AgentResponse::Turn {
-                event: TurnEvent::RetryScheduled { .. },
+            AgentResponse::Round {
+                event: RoundEvent::RetryScheduled { .. },
                 ..
             }
         ))
@@ -370,8 +368,8 @@ async fn turn_exhaustion_message_explains_retry_budget() {
     ));
     let (tx, mut rx) = mpsc::unbounded_channel();
 
-    let error = execute_turn(
-        TurnContext {
+    let error = execute_round(
+        RoundContext {
             agent,
             history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             tx,
@@ -389,7 +387,7 @@ async fn turn_exhaustion_message_explains_retry_budget() {
             retry_base_ms: 1,
             retry_max_ms: 10,
         },
-        TurnInput {
+        RoundInput {
             prompt: "work".to_string(),
             hidden: false,
             display_prompt: None,
@@ -414,8 +412,8 @@ async fn turn_exhaustion_message_explains_retry_budget() {
         .filter(|response| {
             matches!(
                 response,
-                AgentResponse::Turn {
-                    event: TurnEvent::RetryScheduled { .. },
+                AgentResponse::Round {
+                    event: RoundEvent::RetryScheduled { .. },
                     ..
                 }
             )

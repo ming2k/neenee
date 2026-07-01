@@ -7,7 +7,7 @@
 //! is an arbitrary budget that trips legitimate long refactors just as readily
 //! as a genuinely stuck model. The stall detector that came later walked that
 //! back; ADR-0016 replaced it with a periodic diagnostic that fired on a fixed
-//! round cadence (every `review_interval_rounds` past `review_start_round`).
+//! round cadence (every `review_interval_turns` past `review_start_turn`).
 //!
 //! ADR-0018 drops the automatic cadence entirely. The periodic trigger cost a
 //! diagnostic envoy call on *every* long turn — including legitimate ones
@@ -21,7 +21,7 @@
 //!
 //! The diagnostic stays advisory: it surfaces a visible verdict the user can
 //! act on (interrupt with `Esc`) but does **not** abort the turn. A hard stop
-//! remains opt-in via `[agent] hard_stop_rounds` (default `0` = off), the only
+//! remains opt-in via `[agent] hard_stop_turns` (default `0` = off), the only
 //! execution cap, preserving ADR-0009's uncapped default posture.
 //!
 //! ## Extensibility

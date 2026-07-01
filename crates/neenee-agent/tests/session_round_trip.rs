@@ -8,12 +8,12 @@
 //! Inline unit tests inside `neenee-agent` and `neenee-store` cover each half
 //! of this flow in isolation. The purpose of this file is to verify the seam
 //! between them composes correctly: a turn driven against a fresh on-disk
-//! `SessionStore` (via `execute_turn`) must leave enough state on disk that a
+//! `SessionStore` (via `execute_round`) must leave enough state on disk that a
 //! brand-new `SessionStore` opened at the same path can `resume` the saved id
 //! and recover the exact message sequence.
 //!
 //! This is the kind of regression that no inline test catches: a change to the
-//! session event format or to `execute_turn`'s save points can leave both
+//! session event format or to `execute_round`'s save points can leave both
 //! halves internally consistent while breaking the round-trip.
 
 use std::sync::Arc;
@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use neenee_agent::Agent;
 use neenee_agent::orchestration::{
-    ContextProjectionSettings, TurnContext, TurnInput, execute_turn,
+    ContextProjectionSettings, RoundContext, RoundInput, execute_round,
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_core::Role;
@@ -36,7 +36,7 @@ use neenee_store::session::SessionStore;
 const MOCK_REPLY: &str = "This is a streaming mock response from neenee!";
 
 #[tokio::test]
-async fn execute_turn_persists_a_session_that_resume_reopens() {
+async fn execute_round_persists_a_session_that_resume_reopens() {
     let directory = std::env::temp_dir().join(format!(
         "neenee-it-session-roundtrip-{}",
         uuid::Uuid::new_v4()
@@ -52,8 +52,8 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
     let (tx, _rx) = mpsc::unbounded_channel();
 
     let prompt = "hello, mock";
-    let completed = execute_turn(
-        TurnContext {
+    let completed = execute_round(
+        RoundContext {
             agent: agent.clone(),
             history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             tx,
@@ -71,7 +71,7 @@ async fn execute_turn_persists_a_session_that_resume_reopens() {
             retry_base_ms: 1,
             retry_max_ms: 1,
         },
-        TurnInput {
+        RoundInput {
             prompt: prompt.to_string(),
             hidden: false,
             display_prompt: None,

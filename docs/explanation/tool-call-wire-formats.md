@@ -102,7 +102,7 @@ list into Messages format on the way out:
   into the `input` *object* each `tool_use` block needs (`parse_arguments`).
 - **Orphan stripping.** Before sending, the provider collects every answered
   call id and drops any `tool_use` whose result is missing — both APIs reject a
-  call with no matching result, so an interrupted turn can't poison the next
+  call with no matching result, so an interrupted round can't poison the next
   request.
 
 On the way back, both providers reassemble the response into one

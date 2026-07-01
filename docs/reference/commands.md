@@ -17,13 +17,13 @@ Project and user-defined commands are covered under
 | `/clear` | Clear the conversation history |
 | `/permissions [clear]` | Show or clear always-allowed tool rules |
 | `/unattended [on\|off]` | Toggle bypassing write-tool permission prompts |
-| `/review` | Run an on-demand session-review diagnostic of the current turn |
+| `/review` | Run an on-demand session-review diagnostic of the current round |
 | `/search <query>` | Semantic search over the project's session history |
 | `/session [status\|list\|resume\|fork\|open\|new]` | Manage durable sessions |
 | `/sessions` | Browse past sessions |
 | `/btw` | Open a side conversation that runs alongside the main session |
 | `/resume [id]` | Resume the most recent or selected session |
-| `/pursue [condition\|status\|stop\|done\|edit\|clear]` | Pursue a pursuit: the harness keeps the turn going until the condition is met |
+| `/pursue [condition\|status\|stop\|done\|edit\|clear]` | Pursue a pursuit: the harness keeps the round going until the condition is met |
 | `/repeat [cron prompt\|list\|cancel id]` | Schedule a prompt on a cron expression |
 | `/init [path]` | Initialize a `.neenee/` config tree |
 | `/skills [list\|reload]` | List or reload available skills |
@@ -43,7 +43,7 @@ are dispatched by the agent backend.
 
 | Form | Effect |
 |------|--------|
-| `/pursue <condition>` | Set the condition as the active pursuit, arm the stop-gate, and drive the turn until it is met |
+| `/pursue <condition>` | Set the condition as the active pursuit, arm the stop-gate, and drive the round until it is met |
 | `/pursue` | Re-arm and drive a pursuit on the existing active pursuit |
 | `/pursue status` | Show the current pursuit, armed state, and gate iteration |
 | `/pursue edit <condition>` | Rewrite the condition of the current pursuit |
@@ -51,9 +51,9 @@ are dispatched by the agent backend.
 | `/pursue stop` | Stop the active pursuit |
 | `/pursue clear` | Remove the pursuit (disarms and clears) |
 
-`/pursue` arms a **stop-gate**: each time the model would end the turn, the
-harness re-injects the condition and forces another round until the model
-signals completion (`[NEENEE_PURSUIT_COMPLETE]`), the 50-round safety cap is hit,
+`/pursue` arms a **stop-gate**: each time the model would end the round, the
+harness re-injects the condition and forces another turn until the model
+signals completion (`[NEENEE_PURSUIT_COMPLETE]`), the 50-turn safety cap is hit,
 or the user interrupts (`/pursue stop` / `Esc`). Pursuit state is persisted per
 session in SQLite, so it survives restarts and is restored on `/resume`. See
 [Pursuits and the pursue stop-gate](../explanation/agent-design/pursuits.md).
@@ -128,10 +128,10 @@ disturbing the main session context
 ### `/review`
 
 On-demand only — triggers a bounded read-only `REVIEW` envoy that
-diagnoses the current turn and reports verdicts. `/review` takes no
+diagnoses the current round and reports verdicts. `/review` takes no
 arguments; the periodic-cadence design was superseded (see
 [ADR-0018](../adr/0018-per-project-multi-instance-concurrency.md)
-revising [ADR-0016](../adr/0016-session-review-over-round-counting.md)).
+revising [ADR-0016](../adr/0016-session-review-over-turn-counting.md)).
 
 ### `/search`
 

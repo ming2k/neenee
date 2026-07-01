@@ -6,7 +6,7 @@
 
 use neenee_agent::Agent;
 use neenee_agent::orchestration::{send_harness_state, turn};
-use neenee_core::{AgentResponse, Tool, ToolOutput, ToolStream, TurnEvent};
+use neenee_core::{AgentResponse, Tool, ToolOutput, ToolStream, RoundEvent};
 use neenee_tools::BashTool;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 /// (`ToolCall` → live `ToolStream` → `ToolResult` or `ToolCancelled`) so the
 /// existing render path picks it up unchanged.
 ///
-/// Cancellation mirrors `start_interactive_turn`: a fresh
+/// Cancellation mirrors `start_interactive_round`: a fresh
 /// [`CancellationToken`] is installed (any previous token is cancelled) and
 /// the generation counter is bumped so a later turn supersedes a still-running
 /// shell command and its tail-end events do not race with the new turn.
@@ -34,7 +34,7 @@ pub async fn run_shell_command(
     let call_id = format!("shell_{}", uuid::Uuid::new_v4());
     let arguments = serde_json::json!({ "command": command }).to_string();
 
-    // Mirror start_interactive_turn: install a fresh cancellation token,
+    // Mirror start_interactive_round: install a fresh cancellation token,
     // cancelling any in-flight predecessor, and bump the generation so we
     // can tell on exit whether we are still the active turn.
     let token = CancellationToken::new();
@@ -50,7 +50,7 @@ pub async fn run_shell_command(
     // `name: "bash"` to the "running command" activity status.
     let _ = tx.send(turn(
         &session_id,
-        TurnEvent::ToolCall {
+        RoundEvent::ToolCall {
             id: call_id.clone(),
             name: "bash".to_string(),
             arguments: arguments.clone(),
@@ -67,7 +67,7 @@ pub async fn run_shell_command(
         }
         let _ = tx_for_stream.send(turn(
             &session_id_for_stream,
-            TurnEvent::ToolStream {
+            RoundEvent::ToolStream {
                 id: call_id_for_stream.clone(),
                 stream,
             },
@@ -97,7 +97,7 @@ pub async fn run_shell_command(
             if is_current() {
                 let _ = tx.send(turn(
                     &session_id,
-                    TurnEvent::ToolCancelled {
+                    RoundEvent::ToolCancelled {
                         id: call_id,
                         name: "bash".to_string(),
                     },
@@ -110,7 +110,7 @@ pub async fn run_shell_command(
                     let output = structured.to_text();
                     let _ = tx.send(turn(
                         &session_id,
-                        TurnEvent::ToolResult {
+                        RoundEvent::ToolResult {
                             id: call_id,
                             name: "bash".to_string(),
                             output,
@@ -123,7 +123,7 @@ pub async fn run_shell_command(
                     let structured = ToolOutput::Text(error.clone());
                     let _ = tx.send(turn(
                         &session_id,
-                        TurnEvent::ToolResult {
+                        RoundEvent::ToolResult {
                             id: call_id,
                             name: "bash".to_string(),
                             output: error,
@@ -137,13 +137,13 @@ pub async fn run_shell_command(
     }
 
     // Release the slot and flip the harness to idle, matching
-    // start_interactive_turn's cleanup. Guarded by the generation check so
+    // start_interactive_round's cleanup. Guarded by the generation check so
     // a newer turn is not reset by our exit.
     let mut slot = token_slot.write().await;
     if is_current() {
         slot.take();
         drop(slot);
         send_harness_state(&tx, &session_id, &agent, "idle");
-        let _ = tx.send(turn(&session_id, TurnEvent::Activity(String::new())));
+        let _ = tx.send(turn(&session_id, RoundEvent::Activity(String::new())));
     }
 }

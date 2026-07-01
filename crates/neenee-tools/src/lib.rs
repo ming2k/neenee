@@ -14,7 +14,6 @@ pub mod project;
 pub mod search;
 mod ssrf;
 
-mod abort;
 mod ask_user;
 mod bash;
 mod edit;
@@ -29,14 +28,13 @@ mod write;
 
 // Re-export every tool struct at the crate root so existing consumers
 // (`neenee_tools::ReadTextTool`, etc.) keep resolving unchanged.
-pub use abort::AbortTool;
 pub use ask_user::AskUserTool;
 pub use bash::BashTool;
 pub use edit::EditFileTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use list::ListDirTool;
-pub use project::{CreateProjectTool, InitConfigTool};
+pub use project::InitConfigTool;
 pub use read::{ReadTextTerseTool, ReadTextTool};
 pub use read_image::ReadImageTool;
 pub(crate) use web::html_to_text;

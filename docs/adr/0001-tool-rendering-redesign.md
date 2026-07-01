@@ -115,4 +115,4 @@ the child session. MCP/unknown → `· server/tool`, body hidden behind an opt-i
   generic-output opt-in) and `../codex` (single bullet + tree gutters, bounded
   head+tail output with `Ctrl+T` transcript overlay, shimmering status dot,
   structured `FileChange`/`CommandOutput`).
-- [Built-in tools](../reference/tools/index.md), [Tool rounds](../explanation/agent-design/turns-and-rounds.md).
+- [Built-in tools](../reference/tools/index.md), [Tool rounds](../explanation/agent-design/rounds-and-turns.md).

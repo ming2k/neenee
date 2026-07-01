@@ -45,7 +45,7 @@ use crossterm::{
 use neenee_core::{
     AgentRequest, AgentResponse, HarnessSnapshot, Message, ParentStatus, PermissionRequest,
     ProviderPickerSnapshot, Pursuit, Role, SessionContextSnapshot, SessionOverview, TodoList,
-    TurnEvent, UserQuestionRequest,
+    RoundEvent, UserQuestionRequest,
 };
 use neenee_tui::{Backend, Terminal};
 use std::{
@@ -137,13 +137,13 @@ pub async fn run_tui(
     // (`None`) hides the panel.
     let todos: Arc<Mutex<Option<TodoList>>> = Arc::new(Mutex::new(None));
     let todos_clone = todos.clone();
-    let turn_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
-    let turn_count_clone = turn_count.clone();
+    let round_count: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    let round_count_clone = round_count.clone();
     // Current tool round within the active turn. Reset to 0 at each turn
-    // boundary and bumped from `AgentResponse::RoundStarted`. The activity bar
+    // boundary and bumped from `AgentResponse::TurnStarted`. The activity bar
     // renders it as `round M` alongside the turn number.
-    let current_round: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
-    let current_round_clone = current_round.clone();
+    let current_turn: Arc<Mutex<u64>> = Arc::new(Mutex::new(0));
+    let current_turn_clone = current_turn.clone();
     // Stall alert level (consecutive read-only rounds). Bumped by future stall-
     // detection logic; reset at each turn boundary. Dormant until that logic
     // Session-review alert (ADR-0016). Updated when a `SessionReview`
@@ -185,6 +185,13 @@ pub async fn run_tui(
     // (revoke / toggle). `None` until the first response lands.
     let session_context = Arc::new(Mutex::new(None::<SessionContextSnapshot>));
     let session_context_clone = session_context.clone();
+    // Latest `/debug context` snapshot (mirrored from
+    // `AgentResponse::DebugSnapshot`) + a one-shot flag to open the Debug
+    // inspector modal when a snapshot arrives.
+    let debug_snapshot = Arc::new(Mutex::new(None::<neenee_core::DebugSnapshot>));
+    let debug_snapshot_clone = debug_snapshot.clone();
+    let open_debug = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let open_debug_clone = open_debug.clone();
     // Live nudge config snapshot, mirrored from the harness whenever
     // `AgentResponse::NudgeConfigUpdated` arrives. The `/config` modal reads
     // this each frame to render the current thresholds and enabled state;
@@ -251,7 +258,7 @@ pub async fn run_tui(
                 // and to the primary transcript otherwise. Permission and
                 // user-question requests stay global so their modals surface
                 // regardless of which view is focused.
-                AgentResponse::Turn { session_id, event } => {
+                AgentResponse::Round { session_id, event } => {
                     let routes_to_side = listener_side_id.as_deref() == Some(session_id.as_str());
                     // Select the transcript buffer for this event (ADR-0017):
                     // the side buffer when the event's `session_id` matches the
@@ -268,11 +275,11 @@ pub async fn run_tui(
                         &messages_clone
                     };
                     match event {
-                        TurnEvent::Notice(notice) => {
+                        RoundEvent::Notice(notice) => {
                             let mut msgs = buf.write().await;
                             push_core_notice(&mut msgs, &notice);
                         }
-                        TurnEvent::Text(t) => {
+                        RoundEvent::Text(t) => {
                             let (provider, model) =
                                 event_loop::attribution(&cp_clone, &cm_clone).await;
                             let mut msgs = buf.write().await;
@@ -285,20 +292,20 @@ pub async fn run_tui(
                                 activity_clone.lock().await.clear();
                             }
                         }
-                        TurnEvent::Activity(status) => {
+                        RoundEvent::Activity(status) => {
                             if !routes_to_side {
                                 *activity_clone.lock().await = status;
                                 ir_clone.store(true, Ordering::SeqCst);
                             }
                         }
-                        TurnEvent::RoundStarted { round } => {
+                        RoundEvent::TurnStarted { turn } => {
                             if !routes_to_side {
-                                // 1-indexed for display: tool_round 0 is the turn's
+                                // 1-indexed for display: tool_round 0 is the turn
                                 // first model request, shown as `round 1`.
-                                *current_round_clone.lock().await = round as u64 + 1;
+                                *current_turn_clone.lock().await = turn as u64 + 1;
                             }
                         }
-                        TurnEvent::StreamStart => {
+                        RoundEvent::StreamStart => {
                             let (provider, model) =
                                 event_loop::attribution(&cp_clone, &cm_clone).await;
                             let mut msgs = buf.write().await;
@@ -311,13 +318,13 @@ pub async fn run_tui(
                                 *activity_clone.lock().await = "responding".to_string();
                             }
                         }
-                        TurnEvent::StreamDelta(delta) => {
+                        RoundEvent::StreamDelta(delta) => {
                             let mut msgs = buf.write().await;
                             if let Some(last) = msgs.last_mut() {
                                 last.push_stream(&delta);
                             }
                         }
-                        TurnEvent::StreamEnd(final_content) => {
+                        RoundEvent::StreamEnd(final_content) => {
                             if !routes_to_side {
                                 ir_clone.store(true, Ordering::SeqCst);
                                 *activity_clone.lock().await = "finalizing response".to_string();
@@ -328,7 +335,7 @@ pub async fn run_tui(
                                 last.reparse();
                             }
                         }
-                        TurnEvent::StreamDiscard => {
+                        RoundEvent::StreamDiscard => {
                             let mut msgs = buf.write().await;
                             if msgs
                                 .last()
@@ -337,7 +344,7 @@ pub async fn run_tui(
                                 msgs.pop();
                             }
                         }
-                        TurnEvent::UnsentInput { prompt, images } => {
+                        RoundEvent::UnsentInput { prompt, images } => {
                             // Phase-1 unsend: the harness cancelled the turn
                             // before any model output arrived and reverted the
                             // conversation context. Pop the user message we
@@ -360,7 +367,7 @@ pub async fn run_tui(
                                 activity_clone.lock().await.clear();
                             }
                         }
-                        TurnEvent::StreamReasoningDelta(delta) => {
+                        RoundEvent::StreamReasoningDelta(delta) => {
                             let mut msgs = buf.write().await;
                             if let Some(last) =
                                 msgs.last_mut().filter(|message| message.is_thinking())
@@ -399,7 +406,7 @@ pub async fn run_tui(
                                 reasoning_start = Some(std::time::Instant::now());
                             }
                         }
-                        TurnEvent::StreamReasoningEnd(content) => {
+                        RoundEvent::StreamReasoningEnd(content) => {
                             let duration_ms = reasoning_start
                                 .take()
                                 .map(|started| started.elapsed().as_millis() as u64);
@@ -436,7 +443,7 @@ pub async fn run_tui(
                                 }
                             }
                         }
-                        TurnEvent::ToolCall {
+                        RoundEvent::ToolCall {
                             id,
                             name,
                             arguments,
@@ -449,9 +456,9 @@ pub async fn run_tui(
                                 event_loop::attribution(&cp_clone, &cm_clone).await;
                             // Stamp the current tool round so the renderer can
                             // separate adjacent collapsed tool steps that
-                            // belong to different rounds (`RoundStarted` has
+                            // belong to different rounds (`TurnStarted` has
                             // already bumped this counter for the round).
-                            let round = *current_round_clone.lock().await;
+                            let turn = *current_turn_clone.lock().await;
                             let mut msgs = buf.write().await;
                             // A tool step starts collapsed: there's no result to show
                             // yet. The lifecycle-aware default (see `step_interaction`)
@@ -459,13 +466,13 @@ pub async fn run_tui(
                             // Failed/Denied force-expand to surface the error.
                             let message = TranscriptMessage::tool_step(id, name, arguments)
                                 .with_attribution(provider, model)
-                                .with_round(round);
+                                .with_turn(turn);
                             msgs.push(message);
                             if !routes_to_side {
                                 ir_clone.store(true, Ordering::SeqCst);
                             }
                         }
-                        TurnEvent::ToolResult {
+                        RoundEvent::ToolResult {
                             id,
                             name,
                             output,
@@ -524,7 +531,7 @@ pub async fn run_tui(
                                 msgs.push(message);
                             }
                         }
-                        TurnEvent::ToolCancelled { id, .. } => {
+                        RoundEvent::ToolCancelled { id, .. } => {
                             // Convergence: an in-flight call was aborted by an
                             // interrupt. Flip its step (and any nested envoy
                             // children) to Cancelled so it never stays "running".
@@ -550,7 +557,7 @@ pub async fn run_tui(
                                 msgs.push(message);
                             }
                         }
-                        TurnEvent::ToolStream { id, stream } => {
+                        RoundEvent::ToolStream { id, stream } => {
                             // Live partial output from a running tool (e.g. bash
                             // stdout). Accumulate into the running step so it updates
                             // in place instead of freezing on a spinner.
@@ -563,7 +570,7 @@ pub async fn run_tui(
                                 // have been dropped with an aborted turn.
                             }
                         }
-                        TurnEvent::Envoy {
+                        RoundEvent::Envoy {
                             parent_call_id,
                             event,
                         } => {
@@ -610,7 +617,7 @@ pub async fn run_tui(
                         message.push_envoy_event(&event);
                     }
                         }
-                        TurnEvent::PermissionRequest(request) => {
+                        RoundEvent::PermissionRequest(request) => {
                             // A single model response can carry several write tool
                             // calls, each emitting its own request before blocking on
                             // its reply. Queue them FIFO so none is lost; the UI shows
@@ -624,21 +631,21 @@ pub async fn run_tui(
                                 ir_clone.store(true, Ordering::SeqCst);
                             }
                         }
-                        TurnEvent::UserQuestionRequest(request) => {
+                        RoundEvent::UserQuestionRequest(request) => {
                             pending_question_clone.lock().await.push_back(request);
                             if !routes_to_side {
                                 *activity_clone.lock().await = "awaiting user input".to_string();
                                 ir_clone.store(true, Ordering::SeqCst);
                             }
                         }
-                        TurnEvent::InputRequest(request) => {
+                        RoundEvent::InputRequest(request) => {
                             pending_input_clone.lock().await.push_back(request);
                             if !routes_to_side {
                                 *activity_clone.lock().await = "awaiting command input".to_string();
                                 ir_clone.store(true, Ordering::SeqCst);
                             }
                         }
-                        TurnEvent::Compacted {
+                        RoundEvent::Compacted {
                             archived_messages,
                             before_chars,
                             after_chars,
@@ -653,7 +660,7 @@ pub async fn run_tui(
                                 ),
                             );
                         }
-                        TurnEvent::HarnessState(snapshot) => {
+                        RoundEvent::HarnessState(snapshot) => {
                             let running = snapshot.loop_status != "idle";
                             if !routes_to_side {
                                 *harness_clone.lock().await = snapshot;
@@ -664,11 +671,11 @@ pub async fn run_tui(
                                 // approximate (one bump per turn start) which matches
                                 // `Agent::bump_turn`'s semantics in the harness.
                                 if running {
-                                    let mut tc = turn_count_clone.lock().await;
+                                    let mut tc = round_count_clone.lock().await;
                                     *tc = tc.saturating_add(1);
                                     // A new turn resets the round counter; it stays 0
-                                    // until the first `RoundStarted` of the turn lands.
-                                    *current_round_clone.lock().await = 0;
+                                    // until the first `TurnStarted` of the turn lands.
+                                    *current_turn_clone.lock().await = 0;
                                     // Reset the review alert and stamp the turn timer so the
                                     // activity bar can render a live `<elapsed>` segment.
                                     *review_alert_clone.lock().await = String::new();
@@ -678,7 +685,7 @@ pub async fn run_tui(
                                 ir_clone.store(running, Ordering::SeqCst);
                                 if !running {
                                     activity_clone.lock().await.clear();
-                                    *current_round_clone.lock().await = 0;
+                                    *current_turn_clone.lock().await = 0;
                                     *review_alert_clone.lock().await = String::new();
                                     *turn_started_at_clone.lock().await = None;
                                 }
@@ -702,7 +709,7 @@ pub async fn run_tui(
                             let mut msgs = buf.write().await;
                             finalize_streaming_reasoning(&mut msgs, duration_ms);
                         }
-                        TurnEvent::PursuitUpdated(pursuit) => {
+                        RoundEvent::PursuitUpdated(pursuit) => {
                             let prev = if !routes_to_side {
                                 harness_clone.lock().await.pursuit.clone()
                             } else {
@@ -716,7 +723,7 @@ pub async fn run_tui(
                                 harness_clone.lock().await.pursuit = Some(pursuit);
                             }
                         }
-                        TurnEvent::PursuitCleared => {
+                        RoundEvent::PursuitCleared => {
                             // Non-gated mirror: null the snapshot's pursuit
                             // field *without* flushing the activity cell. This
                             // is the fix for the activity-bar-flicker bug —
@@ -729,17 +736,17 @@ pub async fn run_tui(
                                 harness_clone.lock().await.pursuit = None;
                             }
                         }
-                        TurnEvent::TodosUpdated(list) => {
+                        RoundEvent::TodosUpdated(list) => {
                             if !routes_to_side {
                                 *todos_clone.lock().await = Some(list);
                             }
                         }
-                        TurnEvent::UnattendedChanged(enabled) => {
+                        RoundEvent::UnattendedChanged(enabled) => {
                             if !routes_to_side {
                                 harness_clone.lock().await.unattended = enabled;
                             }
                         }
-                        TurnEvent::RetryScheduled {
+                        RoundEvent::RetryScheduled {
                             attempt,
                             max_attempts,
                             delay_ms,
@@ -757,7 +764,7 @@ pub async fn run_tui(
                                 ir_clone.store(true, Ordering::SeqCst);
                             }
                         }
-                        TurnEvent::Error(e) => {
+                        RoundEvent::Error(e) => {
                             let mut msgs = buf.write().await;
                             push_local_notice(&mut msgs, NoticeSeverity::Error, e);
                             if !routes_to_side {
@@ -765,7 +772,7 @@ pub async fn run_tui(
                                 activity_clone.lock().await.clear();
                             }
                         }
-                        TurnEvent::SessionReview { alert } => {
+                        RoundEvent::SessionReview { alert } => {
                             if !routes_to_side {
                                 // Mirror the latest review verdict into the runtime cell
                                 // so the activity bar's `⚠ <alert>` segment shows the
@@ -821,6 +828,10 @@ pub async fn run_tui(
                 }
                 AgentResponse::SessionContext(snapshot) => {
                     *session_context_clone.lock().await = Some(snapshot);
+                }
+                AgentResponse::DebugSnapshot(snapshot) => {
+                    *debug_snapshot_clone.lock().await = Some(snapshot);
+                    open_debug_clone.store(true, Ordering::SeqCst);
                 }
                 AgentResponse::Exit => {
                     should_quit_clone.store(true, Ordering::SeqCst);
@@ -884,6 +895,9 @@ pub async fn run_tui(
         token_ledger: Some(token_ledger),
         token_report_scroll: 0,
         token_report_detail: false,
+        debug_snapshot: None,
+        debug_detail: None,
+        debug_scroll: 0,
         todos_rect: None,
         modal_rect: None,
         sticky_summary_line: None,
@@ -923,8 +937,8 @@ pub async fn run_tui(
         activity_status: String::new(),
         unattended: false,
         todos: None,
-        turn_count: 0,
-        current_round: 0,
+        round_count: 0,
+        current_turn: 0,
         review_alert: String::new(),
         turn_started_at: None,
         activity_tab: ActivityTab::Activity,
@@ -1021,10 +1035,12 @@ pub async fn run_tui(
             sessions_overview,
             open_sessions,
             session_context,
+            debug_snapshot,
+            open_debug,
             nudge_config,
             todos,
-            turn_count,
-            current_round,
+            round_count,
+            current_turn,
             review_alert,
             turn_started_at,
             unsent_input_signal,

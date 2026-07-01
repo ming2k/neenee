@@ -101,7 +101,7 @@ impl PursuitState {
 
     /// Returns a continuation prompt to force another model round, or `None`
     /// to let the turn end. Consulted by both turn loops just before they
-    /// return `TurnOutcome`.
+    /// return `RoundOutcome`.
     ///
     /// Returns `Some(prompt)` only when: the gate is armed, an active
     /// (incomplete) pursuit exists, the latest response did not signal

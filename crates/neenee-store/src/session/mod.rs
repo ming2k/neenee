@@ -792,7 +792,7 @@ impl SessionStore {
     /// rewinding to the previous turn. If `current` is no longer than the
     /// durable prefix (e.g. a compaction already replaced messages) this is a
     /// no-op.
-    pub async fn append_round(&self, current: &[Message]) -> Result<(), String> {
+    pub async fn append_turn(&self, current: &[Message]) -> Result<(), String> {
         // Collect any persistence work to do *outside* the lock. The lock is
         // held only for the in-memory mutation + the (O(1)) event-log append;
         // the full snapshot persistence is deferred to `persist_off_runtime`.
@@ -832,7 +832,7 @@ impl SessionStore {
                 tracing::warn!(
                     baseline,
                     incoming = current.len(),
-                    "append_round: incoming prefix diverged from durable state; full replace"
+                    "append_turn: incoming prefix diverged from durable state; full replace"
                 );
                 state.data.model_window = current.to_vec();
                 state.data.updated_at = unix_timestamp();
@@ -1265,7 +1265,7 @@ fn persist_to(path: &Path, data: &SessionData, blob_store: &BlobStore) -> Result
 /// Once the append-only event log holds more than this many events it is
 /// rewritten to a single seed derived from the session's current full
 /// snapshot. Every call to `persist_off_runtime` writes a *full* snapshot of
-/// the current state (the only non-full persist is `append_round`'s
+/// the current state (the only non-full persist is `append_turn`'s
 /// `Persist::None` mid-turn arm, which does not reach this path), so any event
 /// the seed would supersede has already been folded into the snapshot about to
 /// be written. Compaction can therefore never drop an unabsorbed event. The
@@ -1319,7 +1319,7 @@ fn compact_log_if_needed(log_path: &Path, data: &SessionData) -> Result<(), Stri
 /// `seq > applied_seq`. This is O(snapshot + tail), not O(snapshot + history).
 /// The snapshot is written on every turn-boundary persist with its watermark
 /// stamped to the log's high-water mark, so a clean close leaves an empty tail
-/// and resume is a single JSON read. A crash mid-turn (after `append_round`
+/// and resume is a single JSON read. A crash mid-turn (after `append_turn`
 /// appended a `MessagesAppended` event but before the next `replace_messages`
 /// rewrote the snapshot) leaves a short tail of at most a few events, replayed
 /// in O(tail).
@@ -2547,7 +2547,7 @@ mod tests {
         // `applied_seq` watermark is authoritative for its folded range, and
         // only log events *after* the watermark are replayed. The
         // operationally important case is a lagging snapshot — a crash mid-turn
-        // left `append_round`'s `MessagesAppended` event in the log but the
+        // left `append_turn`'s `MessagesAppended` event in the log but the
         // snapshot still at the previous turn boundary. The tail replay must
         // recover it. This is the "log authoritative for the tail" contract.
         let directory =
@@ -2749,8 +2749,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_round_persists_delta_and_survives_reload() {
-        // The mid-turn save point (ADR-0035): `append_round` writes only the
+    async fn append_turn_persists_delta_and_survives_reload() {
+        // The mid-turn save point (ADR-0035): `append_turn` writes only the
         // new tail as a `MessagesAppended` event, and a fresh `SessionStore`
         // at the same path must replay it to recover the full history. This
         // is the resume-after-crash contract — the whole point of the feature.
@@ -2772,7 +2772,7 @@ mod tests {
             Message::new(neenee_core::Role::Assistant, "I will run a tool"),
             Message::new(neenee_core::Role::Tool, "tool output"),
         ];
-        store.append_round(&round1).await.unwrap();
+        store.append_turn(&round1).await.unwrap();
 
         // Round 2 adds more. The snapshot cache is still at the turn-open
         // state (one message); only the event log has grown.
@@ -2782,7 +2782,7 @@ mod tests {
             Message::new(neenee_core::Role::Tool, "tool output"),
             Message::new(neenee_core::Role::Assistant, "done"),
         ];
-        store.append_round(&round2).await.unwrap();
+        store.append_turn(&round2).await.unwrap();
 
         // The live in-memory state reflects all appends.
         let live = store.model_window().await;
@@ -2801,7 +2801,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_round_is_noop_when_nothing_new() {
+    async fn append_turn_is_noop_when_nothing_new() {
         // Passing a history no longer than the durable baseline (e.g. right
         // after a compaction rewrote the window via `replace_messages`) must
         // not corrupt anything or write a spurious event.
@@ -2813,16 +2813,16 @@ mod tests {
         store.replace_messages(messages.clone()).await.unwrap();
 
         // Same length, same content → no-op.
-        store.append_round(&messages).await.unwrap();
+        store.append_turn(&messages).await.unwrap();
         assert_eq!(store.model_window().await.len(), 1);
 
         let _ = fs::remove_dir_all(directory);
     }
 
     #[tokio::test]
-    async fn append_round_falls_back_to_replace_on_divergent_prefix() {
+    async fn append_turn_falls_back_to_replace_on_divergent_prefix() {
         // If the incoming prefix disagrees with the durable state (a bug or a
-        // compaction that bypassed `replace_messages`), `append_round` must
+        // compaction that bypassed `replace_messages`), `append_turn` must
         // fall back to a full replace rather than splice a corrupt tail.
         let directory =
             std::env::temp_dir().join(format!("neenee-append-diverge-{}", uuid::Uuid::new_v4()));
@@ -2839,7 +2839,7 @@ mod tests {
             Message::new(neenee_core::Role::User, "rewritten"),
             Message::new(neenee_core::Role::Assistant, "new"),
         ];
-        store.append_round(&divergent).await.unwrap();
+        store.append_turn(&divergent).await.unwrap();
 
         // The fallback replaced everything with the incoming history.
         let live = store.model_window().await;

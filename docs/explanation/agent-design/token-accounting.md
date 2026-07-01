@@ -1,7 +1,7 @@
 # Token accounting
 
 neenee measures context pressure in **tokens** because that is the unit every
-model's context window is denominated in. A turn's token count drives the three
+model's context window is denominated in. A round's token count drives the three
 context-projection layers — [pruning](context-pruning.md) →
 [compaction](context-compaction.md) → overflow recovery — and the live meter in
 the TUI's hint bar. Getting that number *approximately* right is what keeps the
@@ -25,10 +25,10 @@ get in the way of "just use the provider's number":
 1. **Not every provider returns usage.** A local relay, a minimal OpenAI-compatible
    server, or a provider that strips the field simply has nothing to report.
 2. **The number arrives *after* the request completes.** The harness needs a
-   pressure estimate *during* a turn (between tool rounds) to decide whether to
+   pressure estimate *during* a round (between tool turns) to decide whether to
    prune, and at that point the current request's usage is not back yet.
 3. **The number is for one request, not the running total.** Each `usage` object
-   describes one round-trip's `prompt_tokens` + `completion_tokens`; the
+   describes one turn-trip's `prompt_tokens` + `completion_tokens`; the
    context pressure is roughly the *next* request's `prompt_tokens`, which is the
    size of the accumulated window.
 
@@ -40,7 +40,7 @@ guesses.
 ## The priority chain
 
 At the single booking point (`Agent::book_turn_usage`,
-`crates/neenee-agent/src/agent.rs`), each turn's usage is resolved through this
+`crates/neenee-agent/src/agent.rs`), each round's usage is resolved through this
 chain, in order:
 
 ```
@@ -64,14 +64,14 @@ streamed Usage event  ──▶  take_last_usage()  ──▶  estimate_message_
 3. **`estimate_message_tokens()` — the local estimator.** The final fallback,
    used whenever the provider reported nothing. Described in detail below.
 
-Whichever source wins, the count is added to the turn's `TokenUsage` and —
+Whichever source wins, the count is added to the round's `TokenUsage` and —
 crucially — recorded into the **token-source ledger** tagged as *reported* (the
 first two) or *estimated* (the third). That tag is what the report modal shows.
 
 ### Why "streamed first, then drained"?
 
 The two upstream paths are not mutually exclusive but are ordered for a reason:
-a streaming turn that emitted a `Usage` event already holds the authoritative
+a streaming round that emitted a `Usage` event already holds the authoritative
 number in `streamed_usage`, so there is no need to also drain the provider's
 stash (which may be empty or stale from a prior request). The `or_else` chain
 makes "we already have the streamed number" short-circuit cleanly.
@@ -153,11 +153,11 @@ TokenSourceLedger
   └─ (provider_id, model) ─▶ { reported_tokens, estimated_tokens }
 ```
 
-Every booked turn increments one of the two counters under its `(provider, model)`
+Every booked round increments one of the two counters under its `(provider, model)`
 key. A session that switches providers or models keeps each one's accuracy
 picture separate. The ledger is a thread-safe shared `Arc` held jointly by:
 
-- **The agent** (writer) — `book_turn_usage` records each turn.
+- **The agent** (writer) — `book_turn_usage` records each round.
 - **The TUI** (reader) — the report modal calls `snapshot()` to render.
 
 `snapshot()` returns a `TokenSourceReport`: a sorted list of rows

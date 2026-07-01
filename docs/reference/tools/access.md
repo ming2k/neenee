@@ -37,12 +37,12 @@ for filesystem permissions:
 |------|--------|--------------|-----------|
 | Needs a human | `requires_user()` (default `false`) | Envoy profiles | `ask_user` |
 | Spawns an envoy | `spawns_envoy()` (default `false`) | Envoy profiles | `envoy` |
-| Affects process control | `affects_control_flow()` (default `false`) | Envoy profiles, broker bypass | `abort` |
+| Affects process control | `affects_control_flow()` (default `false`) | Envoy profiles, broker bypass | — |
 
 A `requires_user()` tool is excluded from envoys unless the profile allows
 user interaction; a `spawns_envoy()` tool is excluded in *every* profile to
 prevent recursion. An `affects_control_flow()` tool exercises control over the
-harness itself (e.g. the `abort` escape hatch) rather than the workspace — it
+harness itself (an escape-hatch-shaped tool) rather than the workspace — it
 is **orthogonal to `access()`**, which classifies *filesystem damage*; this
 axis classifies *process control*. Control tools are excluded from envoys in
 *every* profile (a spawned agent must never be able to tear down the whole

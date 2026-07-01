@@ -39,7 +39,7 @@ pub mod tools;
 pub use metadata::{Skill, SkillDependency, SkillPolicy, SkillScope};
 pub use neenee_core::SkillsConfig;
 pub use render::{build_skills_index, resolve_mentions};
-pub use tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
+pub use tools::{ListSkillsTool, UseSkillTool};
 
 use discovery::discover_all;
 use std::sync::{Arc, RwLock};

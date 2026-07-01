@@ -69,7 +69,7 @@ pub(super) struct UiRuntime {
     pub dirty_notify: Arc<tokio::sync::Notify>,
     /// Full-duplex (ADR-0029): request_id → the parent tool-call id of the
     /// envoy that surfaced a permission or `ask_user` request (carried up
-    /// as a `TurnEvent::Envoy`). When the user answers in the modal, the
+    /// as a `RoundEvent::Envoy`). When the user answers in the modal, the
     /// loop looks the id up here to tag the reply with `parent_call_id` so the
     /// harness routes it down into the live child via the envoy registry.
     /// Top-level requests are absent here → `None` → legacy path. Kept as a
@@ -103,6 +103,13 @@ pub(super) struct UiRuntime {
     /// round-trip completes. Each manager renders a lightweight placeholder
     /// while this is `None`.
     pub session_context: Arc<Mutex<Option<neenee_core::SessionContextSnapshot>>>,
+    /// Latest `/debug context` snapshot, mirrored from
+    /// `AgentResponse::DebugSnapshot`. The Debug inspector modal reads this
+    /// each frame. `None` until a snapshot lands.
+    pub debug_snapshot: Arc<Mutex<Option<neenee_core::DebugSnapshot>>>,
+    /// One-shot request to open the Debug inspector modal, set when a
+    /// `DebugSnapshot` arrives.
+    pub open_debug: Arc<AtomicBool>,
     /// Live nudge config snapshot, mirrored from
     /// `AgentResponse::NudgeConfigUpdated`. The `/config` modal reads this
     /// each frame; edits go out as `AgentRequest::UpdateNudgeConfig` and the
@@ -115,11 +122,11 @@ pub(super) struct UiRuntime {
     /// Live harness turn counter, mirrored from the harness snapshot so the
     /// task panel can reference the current turn.
     /// event channel.
-    pub turn_count: Arc<Mutex<u64>>,
+    pub round_count: Arc<Mutex<u64>>,
     /// Current tool round within the active turn (1-indexed for display).
-    /// Set from `AgentResponse::RoundStarted`; reset to 0 at the turn
+    /// Set from `AgentResponse::TurnStarted`; reset to 0 at the turn
     /// boundary so the pre-request phase does not show a stale round.
-    pub current_round: Arc<Mutex<u64>>,
+    pub current_turn: Arc<Mutex<u64>>,
     /// Session-review alert (ADR-0016), or empty when inactive. Mirrored into
     /// `App::review_alert` each frame; while non-empty the activity bar appends
     /// a `⚠ <alert>` segment.
@@ -480,8 +487,8 @@ pub(super) async fn run_app_loop(
             app.session_context = runtime.session_context.lock().await.clone();
             app.nudge_config = *runtime.nudge_config.lock().await;
             app.todos = runtime.todos.lock().await.clone();
-            app.turn_count = *runtime.turn_count.lock().await;
-            app.current_round = *runtime.current_round.lock().await;
+            app.round_count = *runtime.round_count.lock().await;
+            app.current_turn = *runtime.current_turn.lock().await;
             app.review_alert = runtime.review_alert.lock().await.clone();
             app.turn_started_at = *runtime.turn_started_at.lock().await;
             app.pending_permission = runtime.pending_permission.lock().await.front().cloned();
@@ -569,6 +576,17 @@ pub(super) async fn run_app_loop(
             {
                 app.active_modal = Modal::Sessions;
                 app.modal_index = 0;
+            }
+            // Debug inspector: mirror the latest snapshot and open the modal
+            // when `/debug context` shipped one.
+            app.debug_snapshot = runtime.debug_snapshot.lock().await.clone();
+            if runtime.open_debug.swap(false, Ordering::SeqCst)
+                && app.active_modal != Modal::Permission
+            {
+                app.active_modal = Modal::Debug;
+                app.modal_index = 0;
+                app.debug_detail = None;
+                app.debug_scroll = 0;
             }
         }
 
@@ -1297,6 +1315,16 @@ pub(super) async fn run_app_loop(
                             &app.theme,
                         ))
                     }
+                    Modal::Debug => app.debug_snapshot.as_ref().map(|snapshot| {
+                        render::draw_debug_modal(
+                            f,
+                            snapshot,
+                            app.modal_index.min(render::DebugSection::ALL.len().saturating_sub(1)),
+                            app.debug_detail,
+                            &mut app.debug_scroll,
+                            &app.theme,
+                        )
+                    }),
                     Modal::Tools => Some(render::draw_tools_modal(
                         f,
                         app.session_context.as_ref(),
@@ -1373,8 +1401,8 @@ pub(super) async fn run_app_loop(
                                 pursuit: app.current_pursuit.as_ref(),
                                 todos: app.todos.as_ref(),
                                 user_prompt: user_prompt.as_deref(),
-                                turn_count: app.turn_count,
-                                current_round: app.current_round,
+                                round_count: app.round_count,
+                                current_turn: app.current_turn,
                                 review_alert: &app.review_alert,
                                 current_model: app.current_model.as_str(),
                                 turn_started_at: app.turn_started_at,
@@ -2606,7 +2634,7 @@ pub(super) async fn run_app_loop(
                             app.active_modal = Modal::ConfigLayout;
                             app.modal_index = match app.transcript_layout {
                                 crate::tui::render::layout::Strategy::Compact => 0,
-                                crate::tui::render::layout::Strategy::RoundBand => 1,
+                                crate::tui::render::layout::Strategy::TurnBand => 1,
                             };
                             app.config_scroll = 0;
                         }
@@ -2775,6 +2803,11 @@ pub(super) async fn run_app_loop(
                         // bill list; a second Esc closes the modal.
                         app.token_report_detail = false;
                         app.token_report_scroll = 0;
+                    } else if app.active_modal == Modal::Debug && app.debug_detail.is_some() {
+                        // First Esc returns from a section's detail to the
+                        // section list; a second Esc closes the modal.
+                        app.debug_detail = None;
+                        app.debug_scroll = 0;
                     } else {
                         // Most modals close straight to chat. The model editor
                         // instead steps back to the model picker, so a key entry is
@@ -2834,6 +2867,28 @@ pub(super) async fn run_app_loop(
                         if has_rows {
                             app.token_report_detail = true;
                             app.token_report_scroll = 0;
+                        }
+                    }
+                }
+                input::InputAction::DebugActivate => {
+                    // Enter in the Debug inspector: drill into the selected
+                    // section from the list, or return to the list from a
+                    // drilled-in section (acts like Esc-back).
+                    if app.active_modal == Modal::Debug {
+                        if app.debug_detail.is_some() {
+                            app.debug_detail = None;
+                            app.debug_scroll = 0;
+                        } else {
+                            let section = match app
+                                .modal_index
+                                .min(render::DebugSection::ALL.len().saturating_sub(1))
+                            {
+                                0 => render::DebugSection::Model,
+                                1 => render::DebugSection::Tools,
+                                _ => render::DebugSection::Messages,
+                            };
+                            app.debug_detail = Some(section);
+                            app.debug_scroll = 0;
                         }
                     }
                 }
@@ -3441,6 +3496,14 @@ pub(super) async fn run_app_loop(
                             app.modal_index = (app.modal_index + count - 1) % count;
                         }
                     }
+                    Modal::Debug => {
+                        if app.debug_detail.is_some() {
+                            app.debug_scroll = app.debug_scroll.saturating_sub(1);
+                        } else {
+                            let count = render::DebugSection::ALL.len();
+                            app.modal_index = (app.modal_index + count - 1) % count;
+                        }
+                    }
                     Modal::Help
                     | Modal::Question
                     | Modal::ModelEditor
@@ -3509,6 +3572,14 @@ pub(super) async fn run_app_loop(
                                 .map(|l| l.snapshot().rows.len())
                                 .unwrap_or(0)
                                 .max(1);
+                            app.modal_index = (app.modal_index + 1) % count;
+                        }
+                    }
+                    Modal::Debug => {
+                        if app.debug_detail.is_some() {
+                            app.debug_scroll = app.debug_scroll.saturating_add(1);
+                        } else {
+                            let count = render::DebugSection::ALL.len();
                             app.modal_index = (app.modal_index + 1) % count;
                         }
                     }

@@ -1,19 +1,19 @@
 # Request flow
 
-A user turn is a sequence of HTTP transactions driven by the ReAct loop.
+A user round is a sequence of HTTP transactions driven by the ReAct loop.
 This page documents the byte-level shape of each transaction and how the
 message array evolves across the loop.
 
 For the request-scoped context that feeds each transaction, see
 [Model context](agent-design/model-context.md). For the tool protocol that
 decides *when* a tool call appears in a response, see
-[Tool rounds](agent-design/turns-and-rounds.md). For the high-level turn steps,
+[Tool rounds](agent-design/rounds-and-turns.md). For the high-level round steps,
 see [Harness architecture](agent-design/harness.md). For which providers speak
 this contract, see [Providers](../reference/providers.md).
 
 ## One HTTP transaction
 
-Every round of the loop is one independent HTTP request to the provider's
+Every turn of the loop is one independent HTTP request to the provider's
 chat completions endpoint. The provider is stateless across rounds; the
 full conversation history is re-sent each time.
 
@@ -48,7 +48,7 @@ schemas:
 
 When the provider has no native function calling (`GeminiProvider`,
 `LlamaServerProvider`), neither field is sent and the body uses a
-different shape. See [Tool rounds](agent-design/turns-and-rounds.md) for the fallback.
+different shape. See [Tool rounds](agent-design/rounds-and-turns.md) for the fallback.
 
 Orphan `tool` messages whose `tool_call_id` has no matching preceding
 assistant `tool_calls` are filtered before the body is serialized. This
@@ -148,7 +148,7 @@ flowchart TD
     F --> G{"response has<br/>tool_calls?"}
     G -- yes --> I["execute_tool — local, no HTTP"]
     I --> J["push tool result"]
-    J --> K["relieve pressure + read-loop guard<br/>+ round hooks; tool_rounds += 1"]
+    J --> K["relieve pressure + read-loop guard<br/>+ turn hooks; tool_rounds += 1"]
     K --> C
     G -- no --> L{"fallback JSON<br/>parses?"}
     L -- yes --> M["attach_fallback_tool_call"]
@@ -157,21 +157,21 @@ flowchart TD
     L -- no --> O["return response — loop exits"]
 ```
 
-The loop has **no per-round cap**. The earlier `MAX_TOOL_ROUNDS = 32`
+The loop has **no per-turn cap**. The earlier `MAX_TOOL_ROUNDS = 32`
 hard limit was removed in [ADR-0009](../adr/0009-uncapped-agentic-loop.md);
 the loop now runs until the model emits a final assistant message with no
 tool call, with the deterministic read-loop guard
 ([ADR-0034](../adr/0034-range-aware-pruning-and-deterministic-read-loop-guard.md)),
 on-demand session review
-([ADR-0016](../adr/0016-session-review-over-round-counting.md)), and
+([ADR-0016](../adr/0016-session-review-over-turn-counting.md)), and
 context compaction as backstops.
 
 ### Tool dispatch
 
 The branching after the assistant message differs by transport. For a
-native tool-call round, neenee emits one tool-call event per call up front,
+native tool-call turn, neenee emits one tool-call event per call up front,
 executes all calls concurrently, and records the results in input order.
-For a text-fallback round it parses the assistant `content` as JSON,
+For a text-fallback turn it parses the assistant `content` as JSON,
 optionally retracts the raw JSON from the UI, promotes the parsed call onto
 the assistant message as a synthetic `tool_calls` entry, and executes a
 single call.
@@ -183,10 +183,10 @@ lookup, the write-scope gate, the permission broker, then execution.
 
 The model has no memory between requests. What it "knows" about prior
 tool calls is entirely a function of the `messages` array neenee
-re-sends each round. A turn that reads a file, edits it, and summarizes
+re-sends each turn. A round that reads a file, edits it, and summarizes
 produces three HTTP transactions:
 
-**Request 1** — the user turn opens the loop.
+**Request 1** — the user round opens the loop.
 
 ```text
 messages: [
@@ -216,7 +216,7 @@ tools: [<all schemas>]   ← same set, re-sent verbatim
 Response carries `tool_calls: [edit_file(...)]`. neenee executes the
 edit and appends the result.
 
-**Request 3** — history now contains two tool rounds.
+**Request 3** — history now contains two tool turns.
 
 ```text
 messages: [
@@ -229,12 +229,12 @@ tools: [<all schemas>]
 
 Response carries plain text `content: "The bug was ..."`,
 `finish_reason: "stop"`. No `tool_calls` field. The loop exits and the
-assistant message becomes the turn's final answer.
+assistant message becomes the round's final answer.
 
 The `tools` array is byte-identical across all three requests. The
 `messages` array grows monotonically; neenee never edits prior messages
 (except the attribution step described in
-[Tool rounds](agent-design/turns-and-rounds.md)).
+[Tool rounds](agent-design/rounds-and-turns.md)).
 
 ### Exit conditions
 
@@ -243,13 +243,13 @@ The loop returns a final assistant message when any of these holds:
 | Condition | Result |
 |-----------|--------|
 | Response has no `tool_calls` and no fallback JSON parses | Success; assistant text is the answer |
-| A fourth consecutive identical tool call is rejected | Error; turn aborts |
-| Provider or tool pipeline returns an error | Error; turn aborts |
+| A fourth consecutive identical tool call is rejected | Error; round aborts |
+| Provider or tool pipeline returns an error | Error; round aborts |
 | Context overflow before any tool event | Compact and retry once |
 
 ### Safety bounds
 
-Distinct tool rounds are uncapped — the loop runs until the model emits a
+Distinct tool turns are uncapped — the loop runs until the model emits a
 final assistant message, with context compaction as the backstop
 ([ADR-0009](../adr/0009-uncapped-agentic-loop.md)):
 
@@ -279,11 +279,11 @@ response was plain text.
 The resulting `messages` evolution is identical to the native path. The
 only difference is whether the tool call arrives as a structured
 `tool_calls` field or is parsed out of `content`. See
-[Tool rounds](agent-design/turns-and-rounds.md) for the parsing rules and their limits.
+[Tool rounds](agent-design/rounds-and-turns.md) for the parsing rules and their limits.
 
 ## Retry interaction
 
-Retry lives at the turn level, not inside the provider. A retryable failure
+Retry lives at the round level, not inside the provider. A retryable failure
 (HTTP 408, 429, 5xx, connection, timeout) is wrapped in a retryable error
 and re-issued after backoff.
 
@@ -293,7 +293,7 @@ Two invariants shape the interaction between retry and the ReAct loop:
   executed, the entire request can be re-issued. No side effects have
   occurred; the `messages` array is unchanged.
 - **Post-tool retry is terminal.** Once any tool has run in the current
-  round, retryable errors become terminal. Re-issuing would risk replaying
+  turn, retryable errors become terminal. Re-issuing would risk replaying
   side effects (a second file write, a second shell command).
 
 The deferred-execution rule from [Tool call reassembly](#tool-call-
@@ -307,8 +307,8 @@ by a fresh one.
 
 ## See also
 
-- [Tool rounds](agent-design/turns-and-rounds.md) — schema injection and fallback mechanics
+- [Tool rounds](agent-design/rounds-and-turns.md) — schema injection and fallback mechanics
 - [Provider capabilities](provider-capabilities.md) — why providers differ
   on streaming and tool support
-- [Harness architecture](agent-design/harness.md) — turn execution, retry, safety bounds
+- [Harness architecture](agent-design/harness.md) — round execution, retry, safety bounds
 - [Providers](../reference/providers.md) — endpoint catalog

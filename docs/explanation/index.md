@@ -13,7 +13,7 @@ Directory Specification, and what is safe to delete.
 
 ## Agent design
 
-The design canon for neenee's agent — how a turn is steered, gated, isolated,
+The design canon for neenee's agent — how a round is steered, gated, isolated,
 made durable, and kept honest. The pages share a set of recurring themes
 (capability gating, isolation boundaries, durable vs ephemeral state,
 streaming, fallback, control-plane separation) that the section index lays out
@@ -21,12 +21,12 @@ before the individual docs.
 
 | Page | Purpose |
 |------|--------|
-| [Agent design](agent-design/index.md) | Section index: the recurring design themes, a suggested reading order, and how a turn flows through the canon |
+| [Agent design](agent-design/index.md) | Section index: the recurring design themes, a suggested reading order, and how a round flows through the canon |
 | [Harness architecture](agent-design/harness.md) | Control plane around provider calls, pursuit state, autonomous loop, safety bounds |
-| [Turns and rounds](agent-design/turns-and-rounds.md) | The two-layer execution model (turn vs round) and the lifecycle inside one round: declaration, gating, execution, and how outcomes re-enter the conversation |
+| [Rounds and turns](agent-design/rounds-and-turns.md) | The two-layer execution model (round vs turn) and the lifecycle inside one turn: declaration, gating, execution, and how outcomes re-enter the conversation |
 | [Session persistence](agent-design/session-persistence.md) | The durable local session scene: model window, archived transcript, projection metadata, and resume recovery contract |
 | [Model context](agent-design/model-context.md) | The request-scoped context sent to a provider: rebuilt system prompt, model-visible messages, tool schemas, tool-call arguments, and tool results |
-| [Pursuits](agent-design/pursuits.md) | The `/pursue` stop-gate (within-turn condition-driven pursuit) and the `/repeat` cron scheduler |
+| [Pursuits](agent-design/pursuits.md) | The `/pursue` stop-gate (within-round condition-driven pursuit) and the `/repeat` cron scheduler |
 | [Envoys](agent-design/envoys.md) | The `envoy` tool's read-only child agent: isolation model, event streaming, and the TUI zoom view |
 | [MCP servers](agent-design/mcp.md) | Local stdio MCP server discovery, the `mcp__<server>__<tool>` wrapper, failure isolation, and access-tier gating |
 | [User questions](agent-design/user-questions.md) | How the `ask_user` tool blocks the agent, renders a modal, and returns answers |
@@ -47,6 +47,6 @@ wire-level contract with model servers, and the terminal rendering surface.
 | [Markdown rendering](markdown-rendering.md) | The custom markdown parser → semantic `Block` model → grid rendering pipeline: why it exists, the two-path parse, inline range tracking, adaptive table layout, and how selection returns original source |
 | [Table hit-testing and cell-locked selection](table-hit-testing.md) | How table cells get a parallel hit-test system: layout, dual coordinate maps, cell-locked drag, and border-stripped copy |
 | [Request flow](request-flow.md) | HTTP transaction shape, SSE streaming, and the ReAct loop's message evolution |
-| [Interrupt semantics](interrupt-semantics.md) | Why neenee is streaming-only, the three-phase interrupt model (pre-response unsend / local drop / remote tool cancel), what survives in context, and the billing reality of an interrupted turn |
+| [Interrupt semantics](interrupt-semantics.md) | Why neenee is streaming-only, the three-phase interrupt model (pre-response unsend / local drop / remote tool cancel), what survives in context, and the billing reality of an interrupted round |
 | [Provider capabilities](provider-capabilities.md) | Where tool calling and reasoning actually live across model weights, serving runtime, and client |
 | [Guided decoding](guided-decoding.md) | Constrained decoding, FSM compilation, and chat templates — the layer that guarantees valid tool calls |

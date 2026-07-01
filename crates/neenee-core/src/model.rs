@@ -231,6 +231,43 @@ pub const KNOWN_MODELS: &[Model] = &[
         effort_levels: crate::effort::EFFORT_CLAUDE_NO_XHIGH,
     },
     Model {
+        id: "claude-fable-5",
+        name: "Claude Fable 5",
+        family: "claude",
+        context_window: 1_000_000,
+        // Fable 5 thinking is ALWAYS ON; an explicit `{type:"disabled"}` is
+        // rejected with 400. `AnthropicAdaptiveAlwaysOn` makes the transport
+        // emit `thinking:{type:"adaptive"}` regardless of the user's on/off
+        // choice (an opt-out is a no-op on this model). Manual `type:"enabled"`
+        // also returns 400.
+        thinking: ThinkingSupport::AnthropicAdaptiveAlwaysOn,
+        tool_call: true,
+        vision: true,
+        format: WireFormat::AnthropicCompat,
+        model_guidance: "",
+        // Fable 5 honors the full effort range including `xhigh`/`max`.
+        effort_levels: crate::effort::EFFORT_CLAUDE_FULL,
+    },
+    Model {
+        id: "claude-sonnet-5",
+        name: "Claude Sonnet 5",
+        family: "claude",
+        context_window: 1_000_000,
+        // Sonnet 5: omitting the `thinking` field RUNS adaptive thinking; to
+        // actually disable it you must send `{type:"disabled"}`. This is neither
+        // `AnthropicAdaptive` (omit disables) nor `AnthropicAdaptiveAlwaysOn`
+        // (cannot disable) — so the transport emits an explicit `disabled` on
+        // opt-out to honor ADR-0046. Manual `type:"enabled"` returns 400.
+        thinking: ThinkingSupport::AnthropicAdaptiveOnByDefault,
+        tool_call: true,
+        vision: true,
+        format: WireFormat::AnthropicCompat,
+        model_guidance: "",
+        // Sonnet 5 honors the full range INCLUDING `xhigh` — the key difference
+        // from Sonnet 4.6, which rejects `xhigh` (see EFFORT_CLAUDE_NO_XHIGH).
+        effort_levels: crate::effort::EFFORT_CLAUDE_FULL,
+    },
+    Model {
         id: "claude-haiku-4-5-20251001",
         name: "Claude Haiku 4.5",
         family: "claude",
@@ -515,6 +552,39 @@ mod tests {
         assert_eq!(m.name, "GLM-5.2");
         assert_eq!(m.context_window, 1_000_000);
         assert!(m.reasoning());
+    }
+
+    #[test]
+    fn claude_fable_5_and_sonnet_5_resolve() {
+        // Fable 5: thinking always on, cannot be disabled.
+        let f = resolve("claude-fable-5");
+        assert_eq!(f.name, "Claude Fable 5");
+        assert_eq!(f.family, "claude");
+        assert_eq!(f.context_window, 1_000_000);
+        assert!(f.reasoning());
+        assert_eq!(f.format, WireFormat::AnthropicCompat);
+        assert_eq!(
+            f.thinking,
+            crate::thinking::ThinkingSupport::AnthropicAdaptiveAlwaysOn
+        );
+        assert!(f.effort_levels.contains(&crate::effort::Effort::Xhigh));
+        assert!(f.effort_levels.contains(&crate::effort::Effort::Max));
+
+        // Sonnet 5: on-by-default but disableable thinking; honors xhigh
+        // (unlike Sonnet 4.6, which rejects it).
+        let s = resolve("claude-sonnet-5");
+        assert_eq!(s.name, "Claude Sonnet 5");
+        assert_eq!(s.context_window, 1_000_000);
+        assert!(s.reasoning());
+        assert_eq!(
+            s.thinking,
+            crate::thinking::ThinkingSupport::AnthropicAdaptiveOnByDefault
+        );
+        assert!(s.effort_levels.contains(&crate::effort::Effort::Xhigh));
+
+        // Sanity: Sonnet 4.6 does NOT carry xhigh — confirms 5 differs.
+        let s46 = resolve("claude-sonnet-4-6");
+        assert!(!s46.effort_levels.contains(&crate::effort::Effort::Xhigh));
     }
 
     #[test]

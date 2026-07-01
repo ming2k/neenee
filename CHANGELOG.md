@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`/debug context` — dry-run the next request in a dedicated inspector.** A
+  new dev-only subcommand snapshots the exact model-visible context the next
+  turn would send (rebuilt head system message, auto-loaded skills, message
+  list, tool schemas, provider/model identity, context window, estimated token
+  pressure, and active pursuit) **without** calling the provider or mutating
+  any state. Instead of a flat transcript line it opens a new read-only
+  **Debug inspector modal** — three drill-in sections (Model & Context, Tools,
+  Messages) browsed with `↑/↓`/`Enter`, modelled on the token-report modal.
+  The full JSON (messages + tool schemas) is also persisted to one owner-only
+  file under the per-project `debug/` dir for offline inspection. Pairs with
+  `/debug network` (which captures real round-trips). Carried over the harness
+  channel by a new `AgentResponse::DebugSnapshot` variant + `Modal::Debug`.
+
+### Changed
+
+- **Vocabulary swap: a *round* now contains *turns*.** The two execution
+  layers are relabelled so that a **round** is the unit the user perceives
+  (one submitted message → one final reply) and a **turn** is one iteration
+  of the ReAct loop inside it — the inverse of the prior convention. This is
+  a pure rename; no behavior, persistence format, or wire protocol changes.
+  See [ADR-0047](docs/adr/0047-round-contains-turn-vocabulary.md).
+  - **Breaking config rename.** `hard_stop_rounds` → `hard_stop_turns`,
+    `review_start_round` → `review_start_turn`,
+    `review_interval_rounds` → `review_interval_turns`, and the hook event
+    value `"Round"` → `"Turn"`. Old keys are silently ignored by serde
+    (falling back to defaults); rename them in your config to keep your
+    values.
+  - **Breaking API rename.** `TurnEvent` → `RoundEvent`,
+    `AgentResponse::Turn` → `AgentResponse::Round`, `execute_turn` →
+    `execute_round`, `TurnInput`/`TurnContext` → `RoundInput`/`RoundContext`,
+    `append_round` → `append_turn`, `RoundStarted` → `TurnStarted`,
+    `RoundBand`/`"round_band"` → `TurnBand`/`"turn_band"`.
+  - The Activity-modal detail line flips from `turn N · round M · <model>`
+    to `round N · turn M · <model>`.
+
 ## [0.13.2] - 2026-07-01
 
 ### Fixed

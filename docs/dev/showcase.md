@@ -7,7 +7,7 @@ without running the full agent/session/network stack.
 
 This matters because most modal states are impossible to reach through normal
 agent interaction: a permission `confirm-always` sub-step, a session-context
-pane with a fully populated snapshot, an activity modal mid-turn — these all
+pane with a fully populated snapshot, an activity modal mid-round — these all
 require a live agent to be in a specific state that you can't script. The
 showcase lets you write fixture data and trigger any state directly.
 
@@ -37,7 +37,7 @@ mid-interaction, so you can never get trapped in a raw-mode terminal.
 | `history` | `Ctrl+R` input-history fuzzy search | type to filter `↑↓` |
 | `sessions` | session picker | `↑↓` |
 | `session` | session-context tabbed modal (Model/MCP/Skills/Permissions/Tools) | `←→`/`Tab` cycle panes `↑↓` |
-| `activity` | activity modal (pursuit + tasks + turn/round/status) | `←→`/`Tab` cycle tabs `↑↓` scroll |
+| `activity` | activity modal (pursuit + tasks + round/turn/status) | `←→`/`Tab` cycle tabs `↑↓` scroll |
 | `help` | keybindings help (read-only) | `Esc` quit |
 | `toast` | copy / armed toasts | `Tab` next variant |
 

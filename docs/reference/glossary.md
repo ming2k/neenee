@@ -6,18 +6,24 @@ symbol, the symbol is backticked and never abbreviated.
 
 ## Execution model
 
+neenee names its two execution layers the inverse of most LLM-agent
+tooling: a **turn** is the user-perceived exchange (one submitted
+message and one final reply), and a **round** is one iteration of the
+ReAct loop inside it. See [Rounds and turns](../explanation/agent-design/rounds-and-turns.md)
+and [ADR-0047](../adr/0047-round-contains-turn-vocabulary.md).
+
 | Term | Definition |
 |------|------------|
-| **turn** | The unit the user perceives: one submitted message and one final reply. Opens on submit, closes when the agent emits a final assistant message carrying no tool call. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
-| **round** | One pass through the ReAct loop inside a turn: one model request plus the tool work that follows. The round counter resets every turn. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
-| **turn counter** | A separate monotonic counter that persists across turns, for concerns that measure passage between turns (plan staleness, pursuit accounting). [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
-| **ReAct loop** | The model-request → tool-call → result loop a round iterates on. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
+| **turn** | The unit the user perceives: one submitted message and one final reply. Opens on submit, closes when the agent emits a final assistant message carrying no tool call. [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) |
+| **round** | One pass through the ReAct loop inside a turn: one model request plus the tool work that follows. The round counter resets every turn. [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) |
+| **turn counter** | A separate monotonic counter that persists across rounds, for concerns that measure passage between rounds (plan staleness, pursuit accounting). [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) |
+| **ReAct loop** | The model-request → tool-call → result loop a round iterates on. [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) |
 | **harness** | The control plane around provider calls; keeps model output inside explicit state, execution, and safety boundaries. Owns steering, pursuit, retry, and the autonomous loop. [Harness architecture](../explanation/agent-design/harness.md) |
-| **transcript** | The append-mostly message history resent in full on every request — the model's only memory between requests. Never edited to change meaning. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
-| **catalog** (tool catalog) | The list of tool schemas published to the provider on every request; ephemeral to the runtime, republished each round. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
-| **gating stack** | The ordered checks every tool call crosses before running: lookup → write-scope gate → permission broker. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
-| **native tool-call path** | The runtime carries tool calls in its own structured field; nothing executes until the response terminates. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
-| **fallback tool-call path** | For providers without native function calling: the model emits a call as ordinary text, the agent extracts it and promotes it onto the assistant message. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
+| **transcript** | The append-mostly message history resent in full on every request — the model's only memory between requests. Never edited to change meaning. [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) |
+| **catalog** (tool catalog) | The list of tool schemas published to the provider on every request; ephemeral to the runtime, republished each round. [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) |
+| **gating stack** | The ordered checks every tool call crosses before running: lookup → write-scope gate → permission broker. [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) |
+| **native tool-call path** | The runtime carries tool calls in its own structured field; nothing executes until the response terminates. [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) |
+| **fallback tool-call path** | For providers without native function calling: the model emits a call as ordinary text, the agent extracts it and promotes it onto the assistant message. [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) |
 | **repeated-call guard** | The only in-loop guardrail: three identical tool calls in a row are stuck, so the fourth is rejected as an error. [Harness architecture](../explanation/agent-design/harness.md) |
 | **uncapped agentic loop** | Distinct tool calls and autonomous iterations are uncapped; context compaction is the backstop. [ADR-0009](../adr/0009-uncapped-agentic-loop.md) |
 | **hidden user message** | A message that steers the model but is not rendered in the visible transcript (pursuit re-injection, implicit skill body, hook-injected context). [Pursuits](../explanation/agent-design/pursuits.md) |
@@ -30,7 +36,7 @@ The runtime has one execution engine (`Agent`) that runs in one of two roles.
 | Term | Definition |
 |------|------------|
 | **agent** | Umbrella term for the execution engine (`Agent`, crate `neenee-agent`) and the engine-level protocol (`AgentRequest` / `AgentResponse` / `AgentEvent` / `AgentOp`). Every running role is an agent; use `principal` or `envoy` when the role matters. [Harness architecture](../explanation/agent-design/harness.md) |
-| **principal** | The top-level, human-facing agent a frontend drives. Owns the visible conversation and the user-tunable `[principal]` config table (`hard_stop_rounds`, `loop_review_enabled`). [Configuration](configuration.md) |
+| **principal** | The top-level, human-facing agent a frontend drives. Owns the visible conversation and the user-tunable `[principal]` config table (`hard_stop_turns`, `loop_review_enabled`). [Configuration](configuration.md) |
 | **envoy** | An isolated child agent the principal spawns via the `envoy` tool to serve a bounded sub-question; fresh history, profile-filtered tools, shares only the provider. See the [Envoys](#envoys) section. [Envoys](../explanation/agent-design/envoys.md) |
 
 ## Pursuits and scheduling
@@ -41,8 +47,8 @@ The runtime has one execution engine (`Agent`) that runs in one of two roles.
 | **objective** | The durable condition to pursue — the end-state statement carried by a pursuit. [Pursuits](../explanation/agent-design/pursuits.md) |
 | **stop-gate** | What `/pursue <condition>` arms: at the turn-loop exit it re-injects the condition and forces another round instead of returning. [Pursuits](../explanation/agent-design/pursuits.md) |
 | **`[NEENEE_PURSUIT_COMPLETE]`** | The plain-text control signal the model emits to signal pursuit completion; always stripped from visible output. The gate gates, the model signals. [Pursuits](../explanation/agent-design/pursuits.md) |
-| **`MAX_PURSUIT_ITERATIONS`** | The 50-round safety cap that bounds a pursuit that never signals completion. [Pursuits](../explanation/agent-design/pursuits.md) |
-| **`/repeat` cron scheduler** | Orthogonal clock-driven scheduler: schedules a prompt on a five-field cron expression, stores jobs durably, fires a fresh turn per tick, auto-expires after 30 days. [ADR-0015](../adr/0015-pursue-stop-gate-and-repeat-cron.md) |
+| **`MAX_PURSUIT_ITERATIONS`** | The 50-turn safety cap that bounds a pursuit that never signals completion. [Pursuits](../explanation/agent-design/pursuits.md) |
+| **`/repeat` cron scheduler** | Orthogonal clock-driven scheduler: schedules a prompt on a five-field cron expression, stores jobs durably, fires a fresh round per tick, auto-expires after 30 days. [ADR-0015](../adr/0015-pursue-stop-gate-and-repeat-cron.md) |
 
 ## Task list
 
@@ -58,7 +64,7 @@ The runtime has one execution engine (`Agent`) that runs in one of two roles.
 | **envoy** | An isolated child agent spawned by the `envoy` tool to investigate a sub-question; shares only the provider with the parent, runs with a fresh history and profile-filtered tools. [Envoys](../explanation/agent-design/envoys.md) |
 | **profile** | A declarative bundle (name, system-prompt fragment, and a `ToolPolicy`) that scopes an envoy's behavior; bound by reference by dispatch tools. [Envoys](../explanation/agent-design/envoys.md) |
 | **`EXPLORE` profile** | Research role: `Read` ceiling, no write grant; pure read tools. [Envoys](../explanation/agent-design/envoys.md) |
-| **`REVIEW` profile** | Read-only transcript auditor role used by the session-review diagnostic. [ADR-0016](../adr/0016-session-review-over-round-counting.md) |
+| **`REVIEW` profile** | Read-only transcript auditor role used by the session-review diagnostic. [ADR-0016](../adr/0016-session-review-over-turn-counting.md) |
 | **`TITLE` profile** | Read-only role used to generate a session title in a single model call. [ADR-0022](../adr/0022-session-level-ai-title.md) |
 | **full-duplex** | An envoy is not fire-and-forget: requests travel up to the parent, replies travel down to the exact child. [ADR-0029](../adr/0029-full-duplex-subagent-communication.md) |
 
@@ -75,10 +81,10 @@ The runtime has one execution engine (`Agent`) that runs in one of two roles.
 | **ceiling** | The ordered `ToolAccess` threshold a profile admits tools at or below. [Envoys](../explanation/agent-design/envoys.md) |
 | **`write_paths` grant** | A declarative relative-dir spec on `ToolPolicy`; admits a `Write` tool below the ceiling, then scoped at runtime. [ADR-0028](../adr/0028-capability-allocation-scoped-writes.md) |
 | **`WriteScope`** | A runtime, per-agent filesystem-write boundary (`None` / `Scoped` / `Unrestricted`); a hard boundary, not a prompt. [ADR-0028](../adr/0028-capability-allocation-scoped-writes.md) |
-| **write-scope gate** | The gating-stack step (after lookup, before the broker) that blocks write tools whose target is outside the agent's `WriteScope`. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
+| **write-scope gate** | The gating-stack step (after lookup, before the broker) that blocks write tools whose target is outside the agent's `WriteScope`. [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) |
 | **permission broker** | The interactive authorization surface: Write/Execute tools pass through it before execution; offers once/always/reject. [Harness architecture](../explanation/agent-design/harness.md) |
 | **unattended** | When on, the harness stops prompting for confirmation before write tools. Affects the live process only. [Slash commands](commands.md) |
-| **`tool_call_id` pairing** | The wire requirement that every result message references a preceding call id; preserved across pruning and fallback. [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) |
+| **`tool_call_id` pairing** | The wire requirement that every result message references a preceding call id; preserved across pruning and fallback. [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) |
 
 ## Skills
 
@@ -86,7 +92,7 @@ The runtime has one execution engine (`Agent`) that runs in one of two roles.
 |------|------------|
 | **skill** | On-demand domain expertise: a Markdown document with a small YAML header whose body is injected into the conversation when needed. Not a tool — carries no executable code. [Skills](../explanation/agent-design/skills.md) |
 | **`SKILL.md`** | The skill file inside its own directory (so it can carry auxiliary files); YAML frontmatter declares identity/behavior. [Skills](../explanation/agent-design/skills.md) |
-| **catalog channel** | Each enabled skill's name and one-line description, placed in the system prompt every turn at near-zero cost. [Skills](../explanation/agent-design/skills.md) |
+| **catalog channel** | Each enabled skill's name and one-line description, placed in the system prompt every round at near-zero cost. [Skills](../explanation/agent-design/skills.md) |
 | **body channel** | The full Markdown expertise document, delivered on demand only. [Skills](../explanation/agent-design/skills.md) |
 | **skill scope** | The ordered source priority cascade (lowest→highest): System, Remote, User, Extra, Repo. Higher scope overrides a same-named lower scope. [Skills](../explanation/agent-design/skills.md) |
 | **bundled skills** | Compile-time-embedded into the binary; never on disk, no install step. [ADR-0013](../adr/0013-skills-xdg-paths-and-bundled-embed.md) |
@@ -96,7 +102,7 @@ The runtime has one execution engine (`Agent`) that runs in one of two roles.
 
 | Term | Definition |
 |------|------------|
-| **model context** | The provider-facing request view for one round: rebuilt system prompt, current model window, and current tool catalog serialized for the selected provider. [Model context](../explanation/agent-design/model-context.md) |
+| **model context** | The provider-facing request view for one turn: rebuilt system prompt, current model window, and current tool catalog serialized for the selected provider. [Model context](../explanation/agent-design/model-context.md) |
 | **model-context projection** | The durable archive-and-replace operation that records original context in the session store and produces the model-visible window sent on later provider requests. [Session persistence](../explanation/agent-design/session-persistence.md) |
 | **model window** | The current model-visible message window restored on resume and sent to the provider after prompt assembly and provider-specific filtering. [Model context](../explanation/agent-design/model-context.md) |
 | **archived transcript** | Original messages moved out of the model window by pruning or compaction but retained in the durable session for full recovery. [Session persistence](../explanation/agent-design/session-persistence.md) |
@@ -114,14 +120,14 @@ The runtime has one execution engine (`Agent`) that runs in one of two roles.
 | **transport** | The wire protocol a channel uses (`openai_compat`, `gemini_native`, `llama`). [Configuration](configuration.md) |
 | **model catalog** | Centralized provider-construction factory; every provider id materializes into a `Channel`, so startup and runtime switching share one resolution source. [ADR-0005](../adr/0005-strict-layering-and-renames.md) |
 | **`RetryableError`** | The marker type wrapping transient provider errors; prefixed `[NEENEE_RETRYABLE]`. [Providers](providers.md) |
-| **provider retry** | Turn-level retry loop: transient HTTP 408/429/5xx failures retried with bounded exponential backoff; retryable errors become terminal once any tool has run. [Harness architecture](../explanation/agent-design/harness.md) |
+| **provider retry** | Round-level retry loop: transient HTTP 408/429/5xx failures retried with bounded exponential backoff; retryable errors become terminal once any tool has run. [Harness architecture](../explanation/agent-design/harness.md) |
 
 ## Persistence
 
 | Term | Definition |
 |------|------------|
 | **durable session** | The local recoverable scene for one coding session: durable transcript, model window, archived transcript, title, task list, pursuit state, and projection metadata. [Session persistence](../explanation/agent-design/session-persistence.md) |
-| **admission** | Writes the visible or hidden user message before provider work; each turn records its admission session id. [Harness architecture](../explanation/agent-design/harness.md) |
+| **admission** | Writes the visible or hidden user message before provider work; each round records its admission session id. [Harness architecture](../explanation/agent-design/harness.md) |
 | **XDG layout** | Files classified by nature and routed to Config, Data, State, Cache, or Runtime categories with different operational lifetimes. [Persistence](../explanation/persistence.md) |
 | **override precedence** | Who decides a path, highest→lowest: CLI flag → app env (`NEENEE_*_DIR`) → standard XDG env → native per-OS default → `$HOME` fallback → current directory. [Persistence](../explanation/persistence.md) |
 | **per-project bucket** | Under Data; keeps each working directory's history isolated. The hash is short (16 hex chars / 64 bits). [Persistence](../explanation/persistence.md) |
@@ -132,7 +138,7 @@ The runtime has one execution engine (`Agent`) that runs in one of two roles.
 | Term | Definition |
 |------|------------|
 | **lifecycle hook** | A user-configured shell command that runs automatically at a specific point in the agent's lifecycle. [Lifecycle hooks](../explanation/agent-design/hooks.md) |
-| **lifecycle event** | The events hooks fire on: `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `Round`, `PreCompact`, `PostCompact`. [Lifecycle hooks](../explanation/agent-design/hooks.md) |
+| **lifecycle event** | The events hooks fire on: `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `Turn`, `PreCompact`, `PostCompact`. [Lifecycle hooks](../explanation/agent-design/hooks.md) |
 | **implicit capability** | What a hook may do is implied by its event, not a knob: `PreToolUse`/`Stop` may deny; `PostToolUse`/`UserPromptSubmit`/`PreCompact` may inject context; the rest only observe. [Lifecycle hooks](../explanation/agent-design/hooks.md) |
 | **matcher** | A tool-name filter on the tool events: a `|`-separated exact-name list, or a regex; omitted/`*` matches all. [Lifecycle hooks](../explanation/agent-design/hooks.md) |
 
@@ -183,7 +189,7 @@ documentation and ADRs.
 
 ## See also
 
-- [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) — the
+- [Rounds and turns](../explanation/agent-design/rounds-and-turns.md) — the
   two-layer execution model
 - [Harness architecture](../explanation/agent-design/harness.md) — the
   control plane

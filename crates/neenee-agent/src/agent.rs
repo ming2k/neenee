@@ -7,7 +7,7 @@ use futures::future::BoxFuture;
 ///
 /// Invoked at each tool-round boundary with the *current full* turn history.
 /// The implementation diffs against its own durable baseline and appends only
-/// the new tail to the session event log (see `SessionStore::append_round`).
+/// the new tail to the session event log (see `SessionStore::append_turn`).
 /// Errors are surfaced back to the ReAct loop, which treats a persist failure
 /// as a turn-ending error (better to stop than to keep mutating state that may
 /// not be recoverable).
@@ -128,7 +128,7 @@ pub struct Agent {
     /// do." Drives the sticky panel and persists across restarts. Shared
     /// with the `todo` / `todo_update` tools via `TodoToolContext`.
     todos: Arc<std::sync::Mutex<neenee_core::TodoList>>,
-    /// Harness turn counter, bumped at the start of every `execute_turn`.
+    /// Harness turn counter, bumped at the start of every `execute_round`.
     /// Shared with the todo tools so they can stamp
     /// `updated_at_turn` for the TUI stale detector.
     turn_counter: Arc<std::sync::Mutex<u64>>,
@@ -149,11 +149,11 @@ pub struct Agent {
     /// Optional mid-turn model-context projection gate.
     context_projection_gate: Arc<std::sync::Mutex<Option<Arc<dyn ContextProjectionGate>>>>,
     /// Opt-in hard-stop budget (ADR-0018): abort a turn after this many total
-    /// tool rounds. Seeded from `Config::agent.hard_stop_rounds` (default `0`
+    /// tool rounds. Seeded from `Config::agent.hard_stop_turns` (default `0`
     /// = uncapped, matching ADR-0009) and mutated at runtime via
-    /// `set_hard_stop_rounds`. This is the sole execution cap; session review
+    /// `set_hard_stop_turns`. This is the sole execution cap; session review
     /// is on-demand (`/review`) and never aborts a turn.
-    hard_stop_rounds: Arc<std::sync::Mutex<usize>>,
+    hard_stop_turns: Arc<std::sync::Mutex<usize>>,
     /// Whether the deterministic read-loop guard ([`crate::loop_guard`]) may
     /// inject its anti-anchoring nudge, and the tunable thresholds it uses.
     /// Default **disabled** ([`neenee_core::NudgeConfig::default`]);
@@ -336,7 +336,7 @@ impl EnvoyHandle {
 pub(crate) struct TurnState {
     token_usage: TokenUsage,
     /// Consecutive rounds whose tool calls were all `Read`-tier. Surfaced to
-    /// user-configured round hooks (`HookEvent::Round { consecutive_readonly }`)
+    /// user-configured round hooks (`HookEvent::Turn { consecutive_readonly }`)
     /// so a hook can act on "exploration without progress". Reset to 0 by any
     /// round containing an `Execute`/`Write` call.
     pub(crate) consecutive_readonly_rounds: u32,
@@ -439,7 +439,7 @@ impl Agent {
             thread_id,
             context_prune_threshold_tokens: Arc::new(std::sync::Mutex::new(0)),
             context_projection_gate: Arc::new(std::sync::Mutex::new(None)),
-            hard_stop_rounds: Arc::new(std::sync::Mutex::new(0)),
+            hard_stop_turns: Arc::new(std::sync::Mutex::new(0)),
             nudge_config: Arc::new(std::sync::RwLock::new(neenee_core::NudgeConfig::default())),
             allow_model_stdin: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             reviews: crate::default_reviews(),
@@ -533,6 +533,17 @@ impl Agent {
             .clone()
     }
 
+    /// Dev-only dry run: rebuild the head system message and auto-load any
+    /// skills mentioned in the latest visible user turn against a borrowed
+    /// message list, exactly as the next turn would (`prepare_turn_messages`),
+    /// but with no provider call and no mutation of live turn history. Powers
+    /// the `/debug context` snapshot so it captures the *real* request shape —
+    /// including the freshly composed system prompt and injected skills —
+    /// rather than a degenerate reconstruction.
+    pub fn prepare_turn_messages_debug(&self, messages: &mut Vec<Message>) {
+        self.prepare_turn_messages(messages);
+    }
+
     /// A shared handle to this agent's live variant selection (the **override**
     /// axis). Handed to a spawned envoy's dispatch tool so the envoy — an
     /// agent on the same model — resolves its admitted capabilities to the same
@@ -552,22 +563,22 @@ impl Agent {
         self.prompt_registry = registry;
     }
 
-    /// Override the opt-in hard-stop budget. Mirrors `[agent] hard_stop_rounds`
+    /// Override the opt-in hard-stop budget. Mirrors `[agent] hard_stop_turns`
     /// in `config.toml` but can be flipped at runtime. `0` (the default) leaves
     /// the turn uncapped, matching ADR-0009. The reviewer envoy gets a
     /// tight non-zero bound so a runaway diagnostic cannot loop.
-    pub fn set_hard_stop_rounds(&self, rounds: usize) {
+    pub fn set_hard_stop_turns(&self, rounds: usize) {
         *self
-            .hard_stop_rounds
+            .hard_stop_turns
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = rounds;
     }
 
     /// Current hard-stop budget. Read by the `/hard-stop` slash command (if
     /// present) and by `check_hard_stop` each round.
-    pub fn get_hard_stop_rounds(&self) -> usize {
+    pub fn get_hard_stop_turns(&self) -> usize {
         *self
-            .hard_stop_rounds
+            .hard_stop_turns
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     }
@@ -735,11 +746,11 @@ impl Agent {
     /// Install the mid-turn save point fired at every tool-round boundary
     /// (ADR-0035). The closure receives the *current full* turn history and
     /// should durably append only the new tail (see
-    /// `SessionStore::append_round`). Called once by orchestration after the
+    /// `SessionStore::append_turn`). Called once by orchestration after the
     /// agent is built and the session is open; envoys and the review
     /// diagnostic never call this, so the default `None` keeps their round
     /// boundaries no-ops.
-    pub fn set_round_persist(&self, f: RoundPersistFn) {
+    pub fn set_turn_persist(&self, f: RoundPersistFn) {
         *self.round_persist.lock().unwrap_or_else(|e| e.into_inner()) = Some(f);
     }
 
@@ -783,7 +794,7 @@ impl Agent {
     // below are called by the driver / orchestration at the session, turn, and
     // compaction boundaries.
 
-    /// `UserPromptSubmit` gate. Called by `execute_turn` before the prompt
+    /// `UserPromptSubmit` gate. Called by `execute_round` before the prompt
     /// enters the transcript: a `Deny` drops it, a `Prepend` prefixes context.
     pub async fn fire_user_prompt_submit(&self, prompt: &str) -> crate::hooks::UserPromptVerdict {
         self.hooks()
@@ -890,14 +901,14 @@ impl Agent {
     }
 
     /// Current harness turn counter — bumped at the start of every
-    /// `execute_turn`. Used by the TUI to detect a stale task panel (one
+    /// `execute_round`. Used by the TUI to detect a stale task panel (one
     /// whose `updated_at_turn` lags the current turn by more than
     /// `TODO_STALE_TURN_THRESHOLD`).
     pub fn turn_count(&self) -> u64 {
         *self.turn_counter.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Advance the turn counter. Called once per `execute_turn`. The TUI
+    /// Advance the turn counter. Called once per `execute_round`. The TUI
     /// reads the resulting value to compute "not updated for N turns".
     pub fn bump_turn(&self) {
         let mut g = self.turn_counter.lock().unwrap_or_else(|e| e.into_inner());
@@ -1352,7 +1363,7 @@ impl Agent {
             .collect()
     }
 
-    pub async fn run(&self, messages: &mut Vec<Message>) -> Result<TurnOutcome, HarnessError> {
+    pub async fn run(&self, messages: &mut Vec<Message>) -> Result<RoundOutcome, HarnessError> {
         // Non-interactive convenience path: not cancellable from the outside.
         self.run_with_events(messages, &CancellationToken::new(), |event| match event {
             AgentEvent::PermissionRequest(request) => {
@@ -1372,7 +1383,7 @@ impl Agent {
         messages: &mut Vec<Message>,
         cancel: &CancellationToken,
         mut on_event: F,
-    ) -> Result<TurnOutcome, HarnessError>
+    ) -> Result<RoundOutcome, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
@@ -1463,7 +1474,7 @@ impl Agent {
                 // Mid-turn save point (ADR-0035): see the streaming path.
                 self.fire_round_persist(messages).await?;
                 self.apply_guard_actions(messages, &mut state, &mut on_event);
-                self.run_round_hooks(messages, &state, tool_rounds).await;
+                self.run_turn_hooks(messages, &state, tool_rounds).await;
                 continue;
             }
 
@@ -1480,7 +1491,7 @@ impl Agent {
                 continue;
             }
 
-            return Ok(TurnOutcome {
+            return Ok(RoundOutcome {
                 message: response,
                 token_usage: state.token_usage,
                 duration_ms: turn_start.elapsed().as_millis() as u64,
@@ -1494,7 +1505,7 @@ impl Agent {
         messages: &mut Vec<Message>,
         cancel: &CancellationToken,
         mut on_event: F,
-    ) -> Result<TurnOutcome, HarnessError>
+    ) -> Result<RoundOutcome, HarnessError>
     where
         F: FnMut(AgentEvent) + Send,
     {
@@ -1719,7 +1730,7 @@ impl Agent {
                 // with filesystem side effects.
                 self.fire_round_persist(messages).await?;
                 self.apply_guard_actions(messages, &mut state, &mut on_event);
-                self.run_round_hooks(messages, &state, tool_rounds).await;
+                self.run_turn_hooks(messages, &state, tool_rounds).await;
                 continue;
             }
 
@@ -1736,7 +1747,7 @@ impl Agent {
                 continue;
             }
 
-            return Ok(TurnOutcome {
+            return Ok(RoundOutcome {
                 message: response,
                 token_usage: state.token_usage,
                 duration_ms: turn_start.elapsed().as_millis() as u64,
@@ -2180,17 +2191,17 @@ impl Agent {
         }
     }
 
-    /// Fire user-configured `Round` hooks at the round boundary and fold any
+    /// Fire user-configured `Turn` hooks at the turn boundary and fold any
     /// `Inject` context into hidden user messages. `Deny` is already discarded
-    /// by [`HookRegistry::run_round`], so a round hook cannot abort the turn.
-    async fn run_round_hooks(&self, messages: &mut Vec<Message>, state: &TurnState, round: usize) {
+    /// by [`HookRegistry::run_turn`], so a turn hook cannot abort the round.
+    async fn run_turn_hooks(&self, messages: &mut Vec<Message>, state: &TurnState, turn: usize) {
         let registry = self.hooks();
         if registry.is_empty() {
             return;
         }
         let injected = registry
-            .run_round(
-                round,
+            .run_turn(
+                turn,
                 state.consecutive_readonly_rounds,
                 &self.hook_session_id(),
                 self.hook_cwd().as_deref(),
@@ -2200,7 +2211,7 @@ impl Agent {
             messages.push(Message::injected(
                 Role::User,
                 context,
-                InjectionOrigin::new(InjectionKind::Hook(HookEventKind::Round)),
+                InjectionOrigin::new(InjectionKind::Hook(HookEventKind::Turn)),
             ));
         }
     }
@@ -2293,7 +2304,7 @@ impl Agent {
 
     /// The opt-in hard-stop gate (ADR-0018). Called once per tool round with
     /// the count of rounds that have already run this turn. Returns
-    /// `ControlFlow::Break` only when a finite `hard_stop_rounds` budget was
+    /// `ControlFlow::Break` only when a finite `hard_stop_turns` budget was
     /// configured and `rounds` has reached it — the caller converts that into
     /// a terminal `HarnessError` via [`Self::hard_stop_error`]. The default
     /// budget (`0`) keeps the turn uncapped, exactly matching ADR-0009.
@@ -2302,7 +2313,7 @@ impl Agent {
     /// `/review` ([`Self::review_now`]), which runs the diagnostic envoy
     /// against the live transcript and reports a verdict without aborting.
     fn check_hard_stop(&self, rounds: usize) -> std::ops::ControlFlow<()> {
-        let budget = self.get_hard_stop_rounds();
+        let budget = self.get_hard_stop_turns();
         if budget > 0 && rounds >= budget {
             std::ops::ControlFlow::Break(())
         } else {
@@ -2310,15 +2321,15 @@ impl Agent {
         }
     }
 
-    /// Terminal error surfaced when an opt-in `hard_stop_rounds` budget is
+    /// Terminal error surfaced when an opt-in `hard_stop_turns` budget is
     /// exhausted. Echoes the configured budget so the user can tell this apart
     /// from a normal completion in the transcript. The review itself never
     /// produces this — only an explicit user-configured budget does.
     fn hard_stop_error(&self) -> HarnessError {
-        let budget = self.get_hard_stop_rounds();
+        let budget = self.get_hard_stop_turns();
         HarnessError::Other(format!(
             "Agent stopped: the configured hard-stop budget of {budget} tool \
-             rounds was reached. This budget is opt-in (`hard_stop_rounds`); \
+             rounds was reached. This budget is opt-in (`hard_stop_turns`); \
              raise it or set it to 0 (the default) for an uncapped turn."
         ))
     }

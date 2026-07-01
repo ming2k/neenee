@@ -9,8 +9,8 @@
 //! without disturbing the primary's token/generation.
 
 use neenee_agent::orchestration::{
-    ContextProjectionSettings, InteractiveTurnContext, ProxyProvider, TurnInput,
-    start_interactive_turn,
+    ContextProjectionSettings, InteractiveRoundContext, ProxyProvider, RoundInput,
+    start_interactive_round,
 };
 use neenee_agent::skills::SkillRegistry;
 use neenee_agent::{Agent, AgentIdentity};
@@ -146,7 +146,7 @@ pub async fn start_active_turn(
     primary_generation: &Arc<AtomicU64>,
     tx: &mpsc::UnboundedSender<AgentResponse>,
     config: &Config,
-    input: TurnInput,
+    input: RoundInput,
 ) {
     let projection =
         ContextProjectionSettings::from_config(config, active_context_window(principal));
@@ -190,8 +190,8 @@ pub async fn start_active_turn(
             )
         };
 
-    start_interactive_turn(
-        InteractiveTurnContext {
+    start_interactive_round(
+        InteractiveRoundContext {
             agent,
             history,
             tx: tx.clone(),

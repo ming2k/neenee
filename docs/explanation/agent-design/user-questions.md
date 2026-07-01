@@ -1,6 +1,6 @@
 # User questions
 
-The `ask_user` tool lets the model pause a turn and ask the user one or more
+The `ask_user` tool lets the model pause a round and ask the user one or more
 multiple-choice questions. This page describes the end-to-end mechanism:
 how the request is declared, how the agent blocks until an answer arrives, and
 how the TUI renders and returns the result.
@@ -19,7 +19,7 @@ A dedicated tool gives three advantages:
    UI can render a consistent picker instead of parsing natural-language
    questions.
 2. **Non-blocking architecture** — the tool uses the same oneshot-channel
-   pattern as the permission broker, so the agent turn suspends cleanly and the
+   pattern as the permission broker, so the agent round suspends cleanly and the
    UI remains responsive.
 3. **Observable lifecycle** — every step (call, render, answer, result) flows
    through the normal `AgentEvent` stream, so the transcript records what was
@@ -74,7 +74,7 @@ because that broker already solves the same problem: suspend a tool future,
 queue the request, render a modal, and resume on user input. The key
 difference is that questions are independent—cancelling or rejecting one
 question does not cascade to other pending questions, unlike a permission
-rejection which aborts the whole turn.
+rejection which aborts the whole round.
 
 ## TUI rendering
 
@@ -101,7 +101,7 @@ If the user presses `Esc`, the TUI sends an empty answer. The agent returns a
 text result explaining that no answer was provided, and the model decides how
 to proceed.
 
-If the user interrupts the turn (double `Esc`), the harness
+If the user interrupts the round (double `Esc`), the harness
 rejects every pending question sender with `None`. Each blocked `ask_user`
 future then resolves to the cancelled result.
 
@@ -114,14 +114,14 @@ profile's `allow_user_interaction` flag and the full-duplex channel
 `EXPLORE` profile is non-interactive, so a read-only research envoy that
 needs clarification surfaces the request up to the main agent rather than
 calling `ask_user` directly; the `INTERACTIVE` profile opts in and the
-round-trip works through the handle.
+turn-trip works through the handle.
 
 ## Envoys
 
 `ask_user` also declares `requires_user`, so the built-in `EXPLORE` profile
 excludes it from envoys. An envoy has no user reachable — its
 question-request events are dropped by the dispatch tool's forwarder — so
-admitting `ask_user` there would deadlock until the parent turn is cancelled.
+admitting `ask_user` there would deadlock until the parent round is cancelled.
 Keeping the question with the parent (which *can* ask) is the contract; a
 envoy that hits ambiguity returns it in its written answer instead. See
 [Envoys → Tool admission](envoys.md#tool-admission) and
@@ -131,4 +131,4 @@ envoy that hits ambiguity returns it in its written answer instead. See
 
 - [How to ask the user a question](../../how-to/ask-the-user.md)
 - [Built-in tools](../../reference/tools/index.md)
-- [Tool rounds](turns-and-rounds.md)
+- [Tool rounds](rounds-and-turns.md)

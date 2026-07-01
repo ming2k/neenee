@@ -369,12 +369,12 @@ Ctrl+Shift+C to copy.`
 
 ## Activity modal
 
-Tabbed overview of the current turn, opened by clicking the activity bar.
+Tabbed overview of the current round, opened by clicking the activity bar.
 Two tabs cycled with `←`/`→`:
 
 | Tab | Contents |
 |-----|----------|
-| **Activity** | Pursuit (if any), the current turn's user prompt (wrapped), and the live status block: `turn N · round M · <model> · <elapsed>` + activity label + optional review alert |
+| **Activity** | Pursuit (if any), the current round's user prompt (wrapped), and the live status block: `round N · turn M · <model> · <elapsed>` + activity label + optional review alert |
 | **Tasks** | The unified todo list: `done/total` header plus one row per item with a status glyph |
 
 | Key | Effect |

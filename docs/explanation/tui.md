@@ -293,7 +293,7 @@ summary background and the status accent at roughly 10 fps, not a braille
 `⠋⠙⠹` cycle. Braille spinners read as "the program is computing" and are
 easy to mistake for an unresponsive loop; a slow luminance sweep reads as
 "the program is waiting" — which is almost always the truth during a
-provider round trip.
+provider turn trip.
 
 The breathing dot is also the **single** motion anchor in the TUI: every
 other running indicator (tool-step summary, reasoning marker) holds a
@@ -332,7 +332,7 @@ from line-oriented terminal text.
 
 ### Never block the frame
 
-The render loop is independent of provider speed and clipboard round-trip
+The render loop is independent of provider speed and clipboard turn-trip
 time by construction. The mechanism — spawned tasks for clipboard I/O, a
 snapshot-only mutex for provider state, a short poll while a copy is
 pending — is documented under [Avoiding event-loop stalls](#avoiding-event-loop-stalls);

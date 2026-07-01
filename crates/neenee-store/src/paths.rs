@@ -208,6 +208,16 @@ impl Dirs {
         self.project_dir(project_root).join("network")
     }
 
+    /// Per-project `/debug context` snapshot directory: `projects/<bucket>/debug`.
+    /// One owner-only JSON file is written here per `/debug context` invocation —
+    /// a dry-run of the request that *would* be sent (rebuilt system message +
+    /// auto-loaded skills + message list + tool schemas + token pressure),
+    /// without calling the provider. The directory is created lazily on first
+    /// write by `atomic_write_bytes`. Mirror of the `network/` layout.
+    pub fn project_debug_dir(&self, project_root: &Path) -> PathBuf {
+        self.project_dir(project_root).join("debug")
+    }
+
     /// One session's snapshot path: `sessions/<id>.json`. The matching event
     /// log lives at `sessions/<id>.jsonl` (derived via `with_extension`).
     pub fn project_session_file(&self, project_root: &Path, id: &str) -> PathBuf {

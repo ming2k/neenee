@@ -84,8 +84,8 @@ is visible):
 
 The activity bar carries the breathing-dot liveness anchor plus the live
 status label, the active pursuit objective, a todos `d/t` segment, and the
-turn elapsed timer — each surfaced only while it applies. The structural
-counters (`turn N · round M · <model>`) deliberately do **not** appear on the
+round elapsed timer — each surfaced only while it applies. The structural
+counters (`round N · turn M · <model>`) deliberately do **not** appear on the
 bar; they live inside the Activity modal (opened by clicking the bar), along
 with the per-item todo breakdown. The footer is inset by
 `FOOTER_H_INSET = TRANSCRIPT_H_INSET = 2` cols on each side; all rows share
@@ -238,7 +238,7 @@ the transcript content above.
 | `render/mod.rs` | `draw_transcript` — viewport fill, two-chunk split, footer stack, envoy split, sticky summary overlay |
 | `render/design.rs` | All non-color layout tokens: `VIEWPORT_*`, `TRANSCRIPT_*`, `FOOTER_H_INSET`, `STATUS_BAR_ROWS`, `HINT_BAR_ROWS`, `ENVOY_BAR_ROWS`, `COMPOSER_*`, `MESSAGE_GAP_ROWS` |
 | `render/primitives.rs` | `viewport_rect`, `centered_rect`, `panel_block`, `recess_backdrop` |
-| `render/chrome.rs` | `draw_activity_bar` / `ActivityBarHit` (breathing dot + turn/phase + pursuit + todos), `draw_hint_bar` / `HintBarView`, `draw_completion_menu` |
+| `render/chrome.rs` | `draw_activity_bar` / `ActivityBarHit` (breathing dot + round/phase + pursuit + todos), `draw_hint_bar` / `HintBarView`, `draw_completion_menu` |
 | `render/composer.rs` | `draw_composer` (input box), `INPUT_MSG_IDX` |
 | `render/disclosure/renderers.rs` | `draw_envoy_bar`, `draw_sticky_summary_if_needed` |
 | `app.rs` | `in_envoy_view`, `focus_stack`, `follow_bottom`, scroll clamping |

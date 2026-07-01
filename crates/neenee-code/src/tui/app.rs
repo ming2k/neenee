@@ -163,6 +163,14 @@ pub struct App {
     /// `true` when the TokenReport modal is drilled into a single provider/model
     /// detail (per-round line items + cache efficiency); `false` = the bill list.
     pub token_report_detail: bool,
+    /// Latest `/debug context` snapshot, read by the Debug inspector modal.
+    /// `None` until a snapshot is received from the harness.
+    pub debug_snapshot: Option<neenee_core::DebugSnapshot>,
+    /// Drilled-in section of the Debug inspector (`None` = the section list).
+    /// Holds the same `DebugDetail` / `DebugSection` types the renderer takes.
+    pub debug_detail: neenee_tui_view::render::DebugDetail,
+    /// Scroll offset of the Debug inspector body.
+    pub debug_scroll: usize,
     /// Screen rect of the `todos d/t` segment on the activity bar, so a click
     /// on it opens the Activity modal directly on the Todos section. `None`
     /// when no todos are shown (empty task list or bar hidden).
@@ -315,13 +323,13 @@ pub struct App {
     /// Activity modal as `turn N` (the activity bar itself no longer shows
     /// the structural counters — it surfaces status/plan/elapsed and is the
     /// click target that opens the modal).
-    pub turn_count: u64,
+    pub round_count: u64,
     /// Current tool round within the active turn (1-indexed for display:
     /// `0` means the turn has started but no model request has fired yet —
     /// e.g. the "queued" / "preparing context" phase). Mirrored each frame
     /// from the response listener; shown in the Activity modal as
     /// `turn N · round M · <status>`.
-    pub current_round: u64,
+    pub current_turn: u64,
     /// Session-review alert (ADR-0016), or empty when inactive. While
     /// non-empty the activity bar appends a `⚠ <alert> — Esc to interrupt`
     /// segment. Mirrored each frame from the response listener.
@@ -343,7 +351,7 @@ pub struct App {
     pub help_scroll: usize,
     pub pending_permission: Option<PermissionRequest>,
     /// The pending interactive-input request (L3.5 β) from an interactive
-    /// `bash` command, or `None`. Set when a `TurnEvent::InputRequest` arrives;
+    /// `bash` command, or `None`. Set when a `RoundEvent::InputRequest` arrives;
     /// the input-injection modal reads it for its prompt/command/secret.
     pub pending_input: Option<neenee_core::InputRequest>,
     /// The open question (ask_user) modal's self-contained MVU state, or

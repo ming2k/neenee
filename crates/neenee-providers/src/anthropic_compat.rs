@@ -38,7 +38,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use crate::{NEENEE_USER_AGENT, ensure_success, transport_error};
+use crate::{NEENEE_USER_AGENT, decode_response_json, ensure_success, transport_error};
 
 /// The `anthropic-version` header pinned for the Messages API. opencode-go's
 /// `/v1/messages` surface accepts this value; it is the canonical stable
@@ -423,6 +423,20 @@ impl AnthropicMessagesProvider {
             }
             ThinkingSupport::AnthropicAdaptiveAlwaysOn => {
                 body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
+            }
+            ThinkingSupport::AnthropicAdaptiveOnByDefault => {
+                // Sonnet 5: omitting the field RUNS thinking. To honor an opt-OUT
+                // we MUST send `{type:"disabled"}` explicitly, else the model
+                // reasons and bills against the user's ADR-0046 opt-out intent.
+                // When opted in, emit adaptive (the same shape as the general
+                // adaptive arm below). `display:"summarized"` for the same reason
+                // as the other adaptive arms: the server default `omitted`
+                // streams no readable thinking text.
+                if want {
+                    body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
+                } else {
+                    body["thinking"] = json!({ "type": "disabled" });
+                }
             }
             // AnthropicAdaptive when the user opted in, plus the conservative
             // default for any other model reached over the Anthropic wire
@@ -845,7 +859,7 @@ impl Provider for AnthropicMessagesProvider {
             .map_err(|error| transport_error("Anthropic", error))?;
         let response = ensure_success(response, "Anthropic").await?;
 
-        let response_json: Value = response.json().await.map_err(|e| e.to_string())?;
+        let response_json: Value = decode_response_json(response, "Anthropic").await?;
         if let Some(err) = response_json.get("error") {
             return Err(format!("Anthropic Error: {}", err));
         }

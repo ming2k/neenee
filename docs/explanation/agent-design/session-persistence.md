@@ -48,21 +48,21 @@ smaller projection became model-visible.
 
 ## Admission and Commit
 
-Durability starts before the provider call. When a user submits a turn, the
+Durability starts before the provider call. When a user submits a round, the
 session admits the user message first. Only after that does the agent call the
 provider, run tools, or ask for permissions. If the process stops after
 admission, resume can see that the user request existed and continue from a
 well-defined point rather than losing the prompt.
 
-During a turn, tool rounds are also committed back to the session. Assistant
+During a round, tool turns are also committed back to the session. Assistant
 tool-call messages and matching tool-result messages enter the model window
 after the tool work completes. A late commit is rejected if the user switched
-sessions while the turn was running, so work from an older branch cannot land in
+sessions while the round was running, so work from an older branch cannot land in
 the newly selected one.
 
 The invariant is simple: the durable session should never require guessing
 which side effects already happened. If a tool result is present, the tool call
-has completed. If it is absent, the resumed turn can reason from the persisted
+has completed. If it is absent, the resumed round can reason from the persisted
 state instead of replaying an unsafe half-known action.
 
 ## Context Projection
@@ -113,7 +113,7 @@ A session is correctly resumable when these conditions hold:
   compaction,
 - tool-call ids still pair assistant calls with tool results,
 - hidden harness messages keep their provenance,
-- unfinished pursuit or task state is restored before the next turn,
+- unfinished pursuit or task state is restored before the next round,
 - context-projection metadata says what operation produced the current window.
 
 If those conditions hold, a resumed session does not need to re-prune or

@@ -6,7 +6,7 @@ use futures::stream::BoxStream;
 use neenee_core::{Message, Provider, Role, TokenUsage};
 use serde_json::{Value, json};
 
-use crate::{ensure_success, transport_error};
+use crate::{decode_response_json, ensure_success, transport_error};
 
 pub struct GeminiProvider {
     pub api_key: String,
@@ -163,7 +163,7 @@ impl Provider for GeminiProvider {
             .map_err(|error| transport_error("Gemini", error))?;
         let response = ensure_success(response, "Gemini").await?;
 
-        let response_json: Value = response.json().await.map_err(|e| e.to_string())?;
+        let response_json: Value = decode_response_json(response, "Gemini").await?;
 
         if let Some(err) = response_json.get("error") {
             return Err(format!("Gemini Error: {}", err));

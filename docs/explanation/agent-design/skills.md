@@ -19,7 +19,7 @@ Keeping them separate is the central design idea:
 
 | Channel | What it carries | Where it lands | When |
 |---------|-----------------|----------------|------|
-| **Catalog** | Each enabled skill's name and one-line description | The system prompt | Every turn, rebuilt from the live registry |
+| **Catalog** | Each enabled skill's name and one-line description | The system prompt | Every round, rebuilt from the live registry |
 | **Body** | The full Markdown expertise document | A tool result, or a hidden user message | On demand only |
 
 The catalog is cheap and always present: it tells the model what expertise
@@ -28,9 +28,9 @@ when a skill is actually relevant. This is why a skills index can list dozens of
 skills in the system prompt at near-zero cost, while their full bodies never
 enter context until invoked.
 
-Each turn the harness rebuilds the system message from the live mode, pursuit,
+Each round the harness rebuilds the system message from the live mode, pursuit,
 tool list, and skills catalog. The catalog is the only skills-related content
-that lives in the system prompt; everything else is delivered as a turn-scoped
+that lives in the system prompt; everything else is delivered as a round-scoped
 message.
 
 ## Sources and priority
@@ -49,7 +49,7 @@ lower-priority scope when two skills share a name.
 
 The intent of the cascade is that the most specific source wins: a skill
 checked into a project overrides a user-global skill with the same name, which
-in turn overrides a bundled one. Bundled skills sit at the bottom so that
+in round overrides a bundled one. Bundled skills sit at the bottom so that
 anything a user or project defines always takes precedence over what ships with
 neenee.
 
@@ -102,7 +102,7 @@ context", and they differ only in the message shape they produce:
    even for disabled skills, so the model can load one and explain why it did
    nothing.
 
-2. **Implicit — mention detection.** Before a turn runs, the harness scans the
+2. **Implicit — mention detection.** Before a round runs, the harness scans the
    latest visible user message for skill mentions. A mention is one of:
    - an `@skill-name` reference,
    - a `skill://skill-name` URI,
@@ -116,7 +116,7 @@ context", and they differ only in the message shape they produce:
 
 Because both paths emit the same marker, implicit loading de-duplicates against
 explicit loading: if the model already called `use_skill('foo')`, mentioning
-`foo` later in the same turn does not inject it a second time.
+`foo` later in the same round does not inject it a second time.
 
 ## Policy and enabled state
 
@@ -135,9 +135,10 @@ allows it.
 
 ## Reloading
 
-The `reload_skills` tool rescans every source — local directories and remote
-repositories — and rebuilds the registry in place. It is the way to pick up
-newly added, removed, or edited skill files without restarting neenee.
+The `/skills reload` slash command rescans every source — local directories and
+remote repositories — and rebuilds the registry in place. It is the way to pick
+up newly added, removed, or edited skill files without restarting neenee. (It
+is also bound to the `r` key in the `/skills` modal.)
 
 ## Decision history
 
@@ -150,7 +151,7 @@ newly added, removed, or edited skill files without restarting neenee.
 
 Skills are an **extension surface** of the harness, alongside MCP servers (which
 add tools, not instructions). The harness refreshes the skills catalog when it
-rebuilds the system prompt each turn; see [Harness
-architecture](harness.md). Skill invocation is a special case of a tool round,
-so [Tool rounds](turns-and-rounds.md) describes the execution path an explicit
+rebuilds the system prompt each round; see [Harness
+architecture](harness.md). Skill invocation is a special case of a tool turn,
+so [Tool rounds](rounds-and-turns.md) describes the execution path an explicit
 `use_skill` call takes.

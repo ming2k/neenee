@@ -314,14 +314,14 @@ impl HookRegistry {
         let _ = self.fire(HookEventKind::SessionEnd, None, &ctx).await;
     }
 
-    /// `Round` (ADR-0030): fires once per tool round. Every `Inject` context is
-    /// collected as hidden user messages for the next round. `Deny` is
-    /// **ignored** by contract — a round-count hook cannot abort the turn (the
+    /// `Turn` (ADR-0030): fires once per tool turn. Every `Inject` context is
+    /// collected as hidden user messages for the next turn. `Deny` is
+    /// **ignored** by contract — a turn-count hook cannot abort the round (the
     /// ADR-0009 concern). `consecutive_readonly` carries the read-only streak
     /// so a hook can target exploration-without-progress without re-deriving it.
-    pub async fn run_round(
+    pub async fn run_turn(
         &self,
-        round: usize,
+        turn: usize,
         consecutive_readonly: u32,
         session_id: &str,
         cwd: Option<&Path>,
@@ -332,12 +332,12 @@ impl HookRegistry {
         let ctx = HookContext {
             session_id: session_id.to_string(),
             cwd: cwd.map(Path::to_path_buf),
-            event: HookEvent::Round {
-                round,
+            event: HookEvent::Turn {
+                turn,
                 consecutive_readonly,
             },
         };
-        self.fire(HookEventKind::Round, None, &ctx)
+        self.fire(HookEventKind::Turn, None, &ctx)
             .await
             .into_iter()
             .filter_map(|o| match o {

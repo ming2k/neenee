@@ -159,5 +159,5 @@ Migration:
   `src/query.ts:307,829–835,1704–1712`.
 - [Harness architecture](../explanation/agent-design/harness.md) — the
   surviving safety surface.
-- [Turns and rounds](../explanation/agent-design/turns-and-rounds.md) —
+- [Turns and rounds](../explanation/agent-design/rounds-and-turns.md) —
   what ends a turn under the new model.

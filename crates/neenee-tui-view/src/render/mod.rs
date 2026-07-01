@@ -30,9 +30,10 @@ use design::{
     CODE_BAND_GUTTER_GAP, CODE_BAND_GUTTER_MIN_WIDTH, COMPOSER_MAX_HEIGHT_DIVISOR,
     COMPOSER_MIN_HEIGHT, COMPOSER_PROMPT_PREFIX_COLS, COMPOSER_RIGHT_PAD_COLS,
     COMPOSER_VERTICAL_CHROME_ROWS, ENVOY_BAR_ROWS, FOOTER_H_INSET, HINT_BAR_ROWS,
-    REASONING_TRACE_BLOCK_GAP_ROWS, REASONING_TRACE_BODY_TOP_GAP_ROWS, SIDE_BANNER_ROWS,
-    STATUS_BAR_ROWS, STEP_MIN_WIDTH, TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS,
-    TRANSCRIPT_BODY_LEADING_INDENT, TRANSCRIPT_H_INSET,
+    MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS, REASONING_TRACE_BLOCK_GAP_ROWS,
+    REASONING_TRACE_BODY_TOP_GAP_ROWS, SIDE_BANNER_ROWS, STATUS_BAR_ROWS, STEP_MIN_WIDTH,
+    TOOL_STEP_BODY_TOP_GAP_ROWS, TOOL_STEP_CHILDREN_GAP_ROWS, TRANSCRIPT_BODY_LEADING_INDENT,
+    TRANSCRIPT_H_INSET,
 };
 use disclosure::{StickyStep, draw_envoy_bar, draw_side_banner, draw_sticky_summary_if_needed};
 /// Parse a raw logo file into clamped display lines for the empty-state hero.
@@ -45,11 +46,11 @@ pub(super) use notice::draw_notice;
 pub use overlays::{
     ActivityModalView, CustomEditorView, draw_activity_modal, draw_add_model_editor,
     draw_armed_toast, draw_config_layout_modal, draw_config_modal, draw_config_nudge_modal,
-    draw_copy_toast, draw_custom_provider_editor, draw_help_modal, draw_history_modal,
-    draw_input_injection, draw_mcp_modal, draw_model_editor, draw_models_modal,
+    draw_copy_toast, draw_custom_provider_editor, draw_debug_modal, draw_help_modal,
+    draw_history_modal, draw_input_injection, draw_mcp_modal, draw_model_editor, draw_models_modal,
     draw_permission_sheet, draw_permissions_manager, draw_provider_template_chooser,
     draw_question_modal, draw_sessions_modal, draw_skills_modal, draw_token_report_modal,
-    draw_tools_modal,
+    draw_tools_modal, DebugDetail, DebugSection,
 };
 pub use primitives::recess_backdrop;
 use primitives::viewport_rect;
@@ -61,7 +62,10 @@ use text_layout::{
 };
 pub use theme::Theme;
 
-use neenee_tui::{Block as RtBlock, Constraint, Direction, Frame, Layout, Rect, Style};
+use neenee_tui::{
+    Alignment, Block as RtBlock, Constraint, Direction, Frame, Layout, Line, Paragraph, Rect, Span,
+    Style,
+};
 
 use crate::document::TranscriptMessage;
 use crate::layout::{InteractiveTarget, LayoutMap};
@@ -85,6 +89,54 @@ pub(super) fn transcript_band_rect(area: Rect) -> Rect {
         area.width.saturating_sub(2 * TRANSCRIPT_H_INSET).max(1),
         area.height,
     )
+}
+
+/// Draw the "terminal too small" notice centered in `area`. Replaces the whole
+/// UI when the terminal is resized below [`MIN_TERMINAL_COLS`] ×
+/// [`MIN_TERMINAL_ROWS`]. Renders nothing but the notice so the user knows
+/// exactly what to fix instead of seeing a broken/blank screen.
+///
+/// The message degrades gracefully on very narrow terminals: each line is
+/// truncated to the available width so the notice never overflows or wraps
+/// into the dimensions it is complaining about.
+fn draw_too_small_notice(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let title = Line::from(vec![Span::styled(
+        "Terminal too small",
+        Style::default().fg(theme.warn()),
+    )]);
+    let detail = Line::from(vec![Span::styled(
+        format!(
+            "Please resize to at least {} × {}.",
+            MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS
+        ),
+        Style::default().fg(theme.muted()),
+    )]);
+
+    // Truncate each visible line to the available width so the notice never
+    // overflows the very geometry it is complaining about. A degenerate 0-width
+    // terminal shows nothing; a 1–2 width terminal shows a sliver.
+    let avail = (area.width as usize).max(1);
+    let truncate = |span: Span<'_>| -> Span<'_> {
+        let total: String = span.content.into_owned();
+        if total.chars().count() <= avail {
+            return Span::styled(total, span.style);
+        }
+        let kept: String = total.chars().take(avail).collect();
+        Span::styled(kept, span.style)
+    };
+    let lines: Vec<Line> = vec![
+        Line::from(vec![truncate(title.spans.into_iter().next().unwrap())]),
+        Line::raw(""),
+        Line::from(vec![truncate(detail.spans.into_iter().next().unwrap())]),
+    ];
+
+    // Vertically center the block in whatever height is available.
+    let slack = area.height.saturating_sub(lines.len() as u16) / 2;
+    let para = Paragraph::new(lines).alignment(Alignment::Center);
+    frame.render_widget(
+        para,
+        Rect::new(area.x, area.y + slack, area.width, area.height - slack),
+    );
 }
 
 pub struct TranscriptView<'a> {
@@ -282,9 +334,6 @@ pub fn draw_transcript(
     let mut fallback_height_cache = HeightCache::default();
     let height_cache = height_cache.unwrap_or(&mut fallback_height_cache);
     let full = frame.area();
-    // Components render inside the vertical viewport margins (1 cell top and
-    // bottom); only the background fill uses the full terminal rect.
-    let viewport = viewport_rect(frame);
 
     // Paint the entire frame with the app background so the TUI owns every
     // pixel rather than leaving gaps at the terminal emulator's default color.
@@ -292,6 +341,31 @@ pub fn draw_transcript(
         RtBlock::default().style(Style::default().bg(theme.surface())),
         full,
     );
+
+    // ── Too-small terminal guard ──────────────────────────────────────────
+    // When the terminal is resized below the usable minimum, the layout math
+    // (footer split, composer height, gutter columns) would underflow or
+    // produce an unusable UI — and a degenerate 0×0 / 1×1 geometry risks an
+    // integer-underflow panic deep in a subtraction chain. Instead of drawing
+    // garbage, hide the entire UI and show a single centered notice telling
+    // the user how large the terminal must be. The footer chrome is suppressed
+    // by returning zero-sized rects, so the app loop renders nothing else.
+    if full.width < MIN_TERMINAL_COLS || full.height < MIN_TERMINAL_ROWS {
+        draw_too_small_notice(frame, full, theme);
+        return TranscriptRender {
+            input_rect: Rect::default(),
+            hint_rect: Rect::default(),
+            activity_rect: None,
+            todos_rect: None,
+            content_lines: 0,
+            view_height: 0,
+            sticky: None,
+        };
+    }
+
+    // Components render inside the vertical viewport margins (1 cell top and
+    // bottom); only the background fill uses the full terminal rect.
+    let viewport = viewport_rect(frame);
 
     let size = viewport;
 
@@ -1136,6 +1210,68 @@ mod tests {
         );
         // ...but never more than half the terminal.
         assert!(tall.height <= 12);
+    }
+
+    /// When the terminal is resized below the usable minimum,
+    /// `draw_transcript` must not render the normal UI (which would underflow
+    /// the footer layout math). Instead it hides everything, shows a centered
+    /// "terminal too small" notice, and returns a zeroed `TranscriptRender` so
+    /// the app loop draws no chrome over it.
+    #[test]
+    fn too_small_terminal_shows_notice_and_zeroed_render() {
+        let theme = Theme::default();
+        let messages = vec![TranscriptMessage::new(neenee_core::Role::User, "hello")];
+
+        let mut terminal = neenee_tui::TestTerminal::new(20, 8);
+        let mut render_opt: Option<TranscriptRender> = None;
+        terminal.draw(|f| {
+            render_opt = Some(draw_transcript(
+                f,
+                &mut LayoutMap::new(),
+                TranscriptView {
+                    messages: &messages,
+                    scroll: 0,
+                    selection: &SelectionState::None,
+                    cell_selection: None,
+                    activity: "",
+                    spinner_phase: 0,
+                    input: "",
+                    byte_cursor: 0,
+                    chrome_hidden: false,
+                    envoy_bar: None,
+                    side_banner: None,
+                    pursuit: None,
+                    todos: None,
+                    review_alert: String::new(),
+                    turn_started_at: None,
+                    hovered_step: None,
+                    focused_target: None,
+                    logo: None,
+                    theme: &theme,
+                    layout: crate::render::layout::Strategy::default(),
+                    height_cache: None,
+                },
+            ));
+        });
+
+        let render = render_opt.expect("draw_transcript must return a render");
+        // The guard suppresses all chrome geometry.
+        assert_eq!(render.input_rect, Rect::default());
+        assert_eq!(render.hint_rect, Rect::default());
+        assert_eq!(render.view_height, 0);
+        assert_eq!(render.content_lines, 0);
+
+        // The notice text must be present somewhere in the rendered buffer.
+        let buffer = terminal.buffer();
+        let rendered: String = (0..buffer.area().height)
+            .flat_map(|y| {
+                (0..buffer.area().width).map(move |x| buffer[(x, y)].symbol().to_string())
+            })
+            .collect::<String>();
+        assert!(
+            rendered.contains("Terminal too small"),
+            "expected the too-small notice in the rendered buffer"
+        );
     }
 
     /// An empty composer must still record a layout-map region for its single
@@ -2642,10 +2778,13 @@ mod tests {
     #[test]
     fn h1_underline_excludes_prefix_indent_on_wrapped_rows() {
         let theme = Theme::default();
-        let mut terminal = neenee_tui::TestTerminal::new(20, 16);
+        // Use a terminal at/above the render minimum so `draw_transcript` does
+        // not trip its too-small guard. A 76-column transcript band still
+        // wraps this ~95-char heading to ≥2 rows.
+        let mut terminal = neenee_tui::TestTerminal::new(80, 24);
         let messages = vec![TranscriptMessage::new(
             neenee_core::Role::Assistant,
-            "# This is a very long heading that wraps to multiple lines\n\nbody\n",
+            "# This is a very long heading that intentionally wraps to multiple rows for the underline-prefix test\n\nbody\n",
         )];
         terminal.draw(|f| {
             let _ = draw_transcript(

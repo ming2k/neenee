@@ -32,11 +32,11 @@ pub struct ActivityModalView<'a> {
     pub todos: Option<&'a neenee_core::TodoList>,
     /// The current turn's user prompt, if any. Shown in the Activity tab.
     pub user_prompt: Option<&'a str>,
-    /// Harness turn counter (`turn N`).
-    pub turn_count: u64,
-    /// Current tool round within the turn (1-indexed; `0` before the first
+    /// Harness round counter (`round N`).
+    pub round_count: u64,
+    /// Current tool turn within the round (1-indexed; `0` before the first
     /// model request).
-    pub current_round: u64,
+    pub current_turn: u64,
     /// Session-review alert (ADR-0016), or empty when inactive.
     pub review_alert: &'a str,
     /// Display id of the currently active model.
@@ -61,8 +61,8 @@ pub fn draw_activity_modal(
         pursuit,
         todos,
         user_prompt,
-        turn_count,
-        current_round,
+        round_count,
+        current_turn,
         review_alert,
         current_model,
         turn_started_at,
@@ -169,15 +169,15 @@ pub fn draw_activity_modal(
                     .add_modifier(Modifier::BOLD),
             )]));
 
-            if turn_count > 0 {
+            if round_count > 0 {
                 // Build the structured detail as one string so the container
                 // helper can pre-wrap it as a unit — a long model name or
                 // locale-dependent elapsed string would otherwise overflow the
                 // body's right edge (render_body no longer soft-wraps here).
-                let mut detail = format!("turn {}", turn_count);
-                if current_round >= 1 {
+                let mut detail = format!("round {}", round_count);
+                if current_turn >= 1 {
                     detail.push_str(" · ");
-                    detail.push_str(&format!("round {}", current_round));
+                    detail.push_str(&format!("turn {}", current_turn));
                 }
                 if !current_model.is_empty() {
                     detail.push_str(" · ");

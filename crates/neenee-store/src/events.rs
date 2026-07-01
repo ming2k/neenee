@@ -408,7 +408,7 @@ mod tests {
         // The incremental event (ADR-0035) must serialize under its snake_case
         // tag and round-trip through the log. A `MessagesReplaced` seeds the
         // window, then a `MessagesAppended` extends it — the exact interleave
-        // `append_round` produces inside a real turn.
+        // `append_turn` produces inside a real turn.
         let dir =
             std::env::temp_dir().join(format!("neenee-events-append-{}", uuid::Uuid::new_v4()));
         let log = EventLog::new(dir.join("events.jsonl"));

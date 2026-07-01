@@ -155,6 +155,69 @@ pub(crate) fn transport_error(provider: &str, error: reqwest::Error) -> String {
     }
 }
 
+/// Maximum number of bytes of a raw response body to embed in a decode error.
+/// The rest is truncated with an ellipsis marker — enough to identify an HTML
+/// error page, a gateway interstitial, or a truncated/malformed JSON payload,
+/// without bloating the error string (and the `/debug` capture) with megabytes
+/// of body when a model returns a huge but invalid blob.
+const DECODE_ERROR_BODY_PREVIEW: usize = 2048;
+
+/// Decode a provider response body as JSON, surfacing the **raw response text**
+/// on failure. reqwest's own `.json()` swallows the body and reports only
+/// "error decoding response body" — useless for diagnosing whether the upstream
+/// returned an HTML 502 page, a Cloudflare interstitial, a truncated stream, or
+/// genuinely malformed JSON. This reads the body as text first, then parses;
+/// the failure message embeds a preview of what was actually received plus the
+/// serde line/column when available.
+///
+/// The body text is also logged at `warn` so it reaches the tracing log
+/// regardless of whether `/debug network capture` is enabled (that capture only
+/// sees the post-failure `Err`, never the body that caused it).
+pub(crate) async fn decode_response_json(
+    response: reqwest::Response,
+    provider: &str,
+) -> Result<serde_json::Value, String> {
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| transport_error(provider, error))?;
+    let text = String::from_utf8_lossy(&bytes);
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let preview = body_preview(&text);
+            tracing::warn!(
+                target: "neenee_core::provider",
+                provider = provider,
+                error = %error,
+                body_len = text.len(),
+                body_preview = %preview,
+                "{} response was not valid JSON",
+                provider,
+            );
+            Err(format!(
+                "{provider} error decoding response body: {error} (raw body preview: {preview})"
+            ))
+        }
+    }
+}
+
+/// Build a bounded, lossless preview of a response body for error messages:
+/// truncated to [`DECODE_ERROR_BODY_PREVIEW`] bytes on a UTF-8 boundary and
+/// decorated with a `…<N more bytes>` tail when truncated. Control characters
+/// are escaped so a raw HTML/gateway page stays readable on one line rather
+/// than corrupting the TUI.
+fn body_preview(text: &str) -> String {
+    let total_chars = text.chars().count();
+    let mut preview: String = text.chars().take(DECODE_ERROR_BODY_PREVIEW).collect();
+    let truncated_chars = total_chars.saturating_sub(preview.chars().count());
+    if truncated_chars > 0 {
+        preview.push_str(&format!("…<{truncated_chars} more chars>"));
+    }
+    preview = preview.replace('\n', "\\n").replace('\r', "\\r").replace('\t', "\\t");
+    preview
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +294,45 @@ mod tests {
             !chain_has_transient_io(&benign),
             "a non-transient io kind must not be flagged"
         );
+    }
+
+    #[test]
+    fn body_preview_short_body_passes_through() {
+        assert_eq!(body_preview("<html>502</html>"), "<html>502</html>");
+    }
+
+    #[test]
+    fn body_preview_truncates_long_body_and_reports_remaining_chars() {
+        let long = "a".repeat(DECODE_ERROR_BODY_PREVIEW * 2 + 50);
+        let preview = body_preview(&long);
+        assert_eq!(
+            preview.chars().count(),
+            DECODE_ERROR_BODY_PREVIEW + format!("…<{} more chars>", DECODE_ERROR_BODY_PREVIEW + 50)
+                .chars()
+                .count()
+        );
+        assert!(preview.ends_with(&format!(
+            "…<{} more chars>",
+            DECODE_ERROR_BODY_PREVIEW + 50
+        )));
+    }
+
+    #[test]
+    fn body_preview_escapes_control_characters() {
+        let preview = body_preview("line1\nline2\ttab\rend");
+        assert!(
+            !preview.contains('\n') && !preview.contains('\t') && !preview.contains('\r'),
+            "control chars must be escaped: {preview:?}"
+        );
+        assert!(preview.contains("\\n") && preview.contains("\\t") && preview.contains("\\r"));
+    }
+
+    #[test]
+    fn body_preview_truncates_on_char_boundary() {
+        // A CJK string: ensure truncation does not panic and keeps whole chars.
+        let chars = "日".repeat(DECODE_ERROR_BODY_PREVIEW + 10);
+        let preview = body_preview(&chars);
+        // Every retained char is intact (no replacement char from splitting).
+        assert!(!preview.contains('\u{FFFD}'));
     }
 }

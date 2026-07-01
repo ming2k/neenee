@@ -108,7 +108,7 @@ impl Agent {
         // The reviewer must not run its own reviews (recursion) and is bounded
         // by a tight hard stop so it cannot loop. It registers no review
         // dimensions of its own.
-        reviewer.set_hard_stop_rounds(DEFAULT_REVIEWER_HARD_STOP);
+        reviewer.set_hard_stop_turns(DEFAULT_REVIEWER_HARD_STOP);
         // The reviewer reads a transcript excerpt; disable the deterministic
         // read-loop guard's nudge (ADR-0034) so its own reads are never steered.
         reviewer.set_nudge_config(neenee_core::NudgeConfig::disabled());

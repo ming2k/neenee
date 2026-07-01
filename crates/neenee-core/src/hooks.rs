@@ -38,11 +38,11 @@ pub enum HookEventKind {
     Stop,
     PreCompact,
     PostCompact,
-    /// Fires once per tool round (ADR-0030). Constrained: only `Inject` is
-    /// honoured — `Deny` is ignored so a round-count hook cannot become a
-    /// de-facto round cap (the ADR-0009 concern). The harness declares no
+    /// Fires once per tool turn (ADR-0030). Constrained: only `Inject` is
+    /// honoured — `Deny` is ignored so a turn-count hook cannot become a
+    /// de-facto turn cap (the ADR-0009 concern). The harness declares no
     /// built-in threshold on this axis; it only provides the trigger point.
-    Round,
+    Turn,
 }
 
 impl HookEventKind {
@@ -97,11 +97,11 @@ pub enum HookEvent {
     PreCompact,
     PostCompact,
     /// Fires once per tool round (ADR-0030). `consecutive_readonly` carries the
-    /// read-only-round streak so a hook can act on "exploration without
+    /// read-only-turn streak so a hook can act on "exploration without
     /// progress" without re-deriving it. Only `Inject` is honoured (see
-    /// [`HookEventKind::Round`]).
-    Round {
-        round: usize,
+    /// [`HookEventKind::Turn`]).
+    Turn {
+        turn: usize,
         consecutive_readonly: u32,
     },
 }
@@ -118,7 +118,7 @@ impl HookEvent {
             Self::Stop { .. } => HookEventKind::Stop,
             Self::PreCompact => HookEventKind::PreCompact,
             Self::PostCompact => HookEventKind::PostCompact,
-            Self::Round { .. } => HookEventKind::Round,
+            Self::Turn { .. } => HookEventKind::Turn,
         }
     }
 
@@ -146,11 +146,11 @@ pub enum HookOutcome {
     /// `PreToolUse`: the call is blocked; `reason` becomes the tool error the
     /// model sees. `Stop`: the turn continues for another round with `reason`
     /// fed back as a hidden user message. Ignored on other events, including
-    /// `Round` (ADR-0030: a round-count hook may not become a de-facto cap).
+    /// `Turn` (ADR-0030: a turn-count hook may not become a de-facto cap).
     Deny { reason: String },
     /// Inject `context` as a hidden user message the model sees on its next
     /// round. Honoured on `UserPromptSubmit` (prepended), `Stop`,
-    /// `PostToolUse`, and `Round`. Ignored elsewhere.
+    /// `PostToolUse`, and `Turn`. Ignored elsewhere.
     Inject { context: String },
 }
 

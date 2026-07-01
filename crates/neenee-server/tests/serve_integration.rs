@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use neenee_core::{AgentRequest, AgentResponse, TurnEvent};
+use neenee_core::{AgentRequest, AgentResponse, RoundEvent};
 use neenee_server::serve;
 use neenee_store::session::SessionStore;
 use tokio::sync::{broadcast, mpsc};
@@ -75,9 +75,9 @@ async fn test_ws_round_trip() {
     }
 
     // 4. Simulate agent_loop emitting a response → broadcast → should reach WS client
-    let resp = AgentResponse::Turn {
+    let resp = AgentResponse::Round {
         session_id,
-        event: TurnEvent::Text("hello back from agent".to_string()),
+        event: RoundEvent::Text("hello back from agent".to_string()),
     };
     let _ = bc_tx.send(resp);
 
@@ -97,18 +97,18 @@ async fn test_ws_round_trip() {
 
 #[tokio::test]
 async fn serde_shapes() {
-    use neenee_core::{AgentRequest, AgentResponse, ToolOutput, TurnEvent};
+    use neenee_core::{AgentRequest, AgentResponse, ToolOutput, RoundEvent};
     println!("--- serialization shapes ---");
 
-    let resp = AgentResponse::Turn {
+    let resp = AgentResponse::Round {
         session_id: "s1".into(),
-        event: TurnEvent::Text("hello".into()),
+        event: RoundEvent::Text("hello".into()),
     };
     println!("Turn(Text): {}", serde_json::to_string(&resp).unwrap());
 
-    let tc = AgentResponse::Turn {
+    let tc = AgentResponse::Round {
         session_id: "s1".into(),
-        event: TurnEvent::ToolCall {
+        event: RoundEvent::ToolCall {
             id: "c1".into(),
             name: "read_text".into(),
             arguments: "{}".into(),
@@ -125,9 +125,9 @@ async fn serde_shapes() {
     let err = AgentResponse::Error("oops".into());
     println!("Error: {}", serde_json::to_string(&err).unwrap());
 
-    let tr = AgentResponse::Turn {
+    let tr = AgentResponse::Round {
         session_id: "s1".into(),
-        event: TurnEvent::ToolResult {
+        event: RoundEvent::ToolResult {
             id: "c1".into(),
             name: "bash".into(),
             output: "done".into(),
@@ -137,9 +137,9 @@ async fn serde_shapes() {
     };
     println!("Turn(ToolResult): {}", serde_json::to_string(&tr).unwrap());
 
-    let delta = AgentResponse::Turn {
+    let delta = AgentResponse::Round {
         session_id: "s1".into(),
-        event: TurnEvent::StreamDelta("chunk".into()),
+        event: RoundEvent::StreamDelta("chunk".into()),
     };
     println!(
         "Turn(StreamDelta): {}",

@@ -3,9 +3,9 @@
 The harness is the control plane around provider calls. It keeps model output
 inside explicit state, execution, and safety boundaries.
 
-## Turn execution
+## Round execution
 
-Every CLI turn runs the streaming agent loop:
+Every CLI round runs the streaming agent loop:
 
 1. Refresh the system context with pursuit, tools, and skill metadata.
 2. Stream provider text and reconstruct native tool-call deltas by index.
@@ -31,16 +31,16 @@ The harness distinguishes two model capability surfaces. Tools are declared
 to the provider on every request; reasoning is observed from the provider
 when the model emits it. For the capability model and wire-level protocol,
 see [Provider capabilities](../provider-capabilities.md) and
-[Tool rounds](turns-and-rounds.md).
+[Tool rounds](rounds-and-turns.md).
 
 ### Declared: tools
 
-Tool schemas live inside the provider, not the conversation. Each turn caches
+Tool schemas live inside the provider, not the conversation. Each round caches
 every tool's OpenAI function schema before any network work. Every HTTP
 request then re-injects the full cached set as the `tools` field with
 `tool_choice: "auto"`.
 
-Tool schemas are request-scoped. Every ReAct round, including the round that
+Tool schemas are request-scoped. Every ReAct turn, including the turn that
 carries tool results back upstream, sends the same complete schema set
 alongside the full message history. The provider is stateless across turns.
 
@@ -68,7 +68,7 @@ Both execution paths feed one shared registry:
 
 | Path | Transport | Tool calls |
 |------|-----------|-----------|
-| Non-streaming | Single HTTP round trip | `choices[0].message.tool_calls` complete |
+| Non-streaming | Single HTTP turn trip | `choices[0].message.tool_calls` complete |
 | Streaming | SSE stream | `delta.tool_calls` fragments accumulated by `index` |
 
 The streaming path accumulates `id`, `name`, and `arguments` per index while
@@ -83,7 +83,7 @@ For providers without native function calling, the harness extracts
 `{"tool": "<name>", "arguments": {…}}` from assistant text and promotes the
 parsed call onto the preceding assistant message as a native `tool_calls`
 entry so OpenAI-compatible `tool_call_id` pairing stays valid on the next
-round.
+turn.
 
 Fallback text is withdrawn from the visible transcript before the tool step
 is emitted, matching the native streaming path. The same registry, permission
@@ -105,26 +105,26 @@ with `[NEENEE_PURSUIT_COMPLETE]` (ADR-0031). See
 
 ## Pursue stop-gate
 
-`/pursue` arms a **stop-gate** on the agent and drives one turn. Each time the
-model would end the turn, the gate re-injects the condition as a hidden user
-message and forces another round instead of returning. The turn therefore runs
+`/pursue` arms a **stop-gate** on the agent and drives one round. Each time the
+model would end the round, the gate re-injects the condition as a hidden user
+message and forces another turn instead of returning. The round therefore runs
 to completion across many rounds.
 
 | Form | Effect |
 |------|--------|
-| `/pursue <condition>` | Set the condition, arm the gate, and drive the turn until met |
+| `/pursue <condition>` | Set the condition, arm the gate, and drive the round until met |
 | `/pursue` | Re-arm and drive on the existing active pursuit |
 
 The pursuit stops when:
 
 - the model emits `[NEENEE_PURSUIT_COMPLETE]`;
-- the 50-round safety cap is hit (the gate disarms);
+- the 50-turn safety cap is hit (the gate disarms);
 - the user presses `Esc` or runs `/pursue stop`;
 - a newer request supersedes it;
 - the provider or tool pipeline returns an error.
 
-This replaces the old outer multi-turn `/loop` (ADR-0009's uncapped loop) with
-within-turn continuation — one driver, no outer loop. The clock-driven
+This replaces the old outer multi-round `/loop` (ADR-0009's uncapped loop) with
+within-round continuation — one driver, no outer loop. The clock-driven
 counterpart is `/repeat`, a cron scheduler; see
 [Pursuits](pursuits.md) for the comparison.
 
@@ -152,11 +152,11 @@ replayed.
 
 Distinct tool calls and autonomous loop iterations are both **uncapped**,
 matching the codex / claude-code agentic-loop model. Context compaction
-(thresholds derived from the active model's context window, plus mid-turn
+(thresholds derived from the active model's context window, plus mid-round
 pruning) is the backstop that keeps unbounded loops from exhausting the
 context window; the user can interrupt at any time with `Esc` or
 `/pursue stop`. See ADR-0009 for the rationale and the prior caps (32 tool
-rounds per turn, 50 autonomous iterations per `/loop`) that this decision
+rounds per round, 50 autonomous iterations per `/loop`) that this decision
 removed.
 
 ### Read-loop guard (ADR-0034)
@@ -164,13 +164,13 @@ removed.
 The cheapest stuck state to detect is the *repeated read*: the model re-issuing
 the same `read_file` (one page, or thrashing between two pages) without progress.
 Identical read arguments return identical bytes, so this is a *provable* waste
-that needs no model judgement. A per-turn guard
-(`neenee-agent/src/loop_guard.rs`) keeps a sliding window of recent read-round
+that needs no model judgement. A per-round guard
+(`neenee-agent/src/loop_guard.rs`) keeps a sliding window of recent read-turn
 signatures and, when one recurs past a threshold, injects a hidden anti-anchoring
 nudge (`InjectionKind::LoopReviewNudge`) naming the repeated read and demanding a
 different action. Detection is pure bookkeeping (no inference, no false positives
 on genuine paging, which reads distinct ranges); the nudge is **non-terminating**
-— `Esc`, `hard_stop_rounds`, and `abort` stay the hard backstops. Gated by
+— `Esc`, `hard_stop_turns`, and `abort` stay the hard backstops. Gated by
 `[principal] loop_review_enabled` (default on; off for envoys and `/review`).
 
 ### Session review (ADR-0016)
@@ -181,17 +181,17 @@ tool calls that loop without converging), the harness runs a periodic
 replacement for the old read-only "stall detector" that ADR-0009's uncapping
 made redundant:
 
-- After `[agent.review] review_start_round` (default **64**) tool rounds in a
-  turn, and every `review_interval_rounds` (default **16**) thereafter, the
+- After `[agent.review] review_start_turn` (default **64**) tool turns in a
+  round, and every `review_interval_turns` (default **16**) thereafter, the
   harness spawns a bounded read-only diagnostic envoy (the `REVIEW`
   profile) that reads a compact snapshot of the live transcript and returns a
   verdict per registered review dimension.
 - The worst verdict is surfaced as a visible activity-bar alert (empty verdict
   = clear). An explicit **stuck** verdict also pushes a one-shot hidden
   reflection nudge so the model gets a chance to recover.
-- Review **never aborts the turn**. The only execution cap is an explicit,
-  opt-in `hard_stop_rounds` (default **0** = off); a finite value is a
-  user-declared budget and the sole thing that hard-stops a turn.
+- Review **never aborts the round**. The only execution cap is an explicit,
+  opt-in `hard_stop_turns` (default **0** = off); a finite value is a
+  user-declared budget and the sole thing that hard-stops a round.
 - "Is the agent looping?" is the first dimension (`LoopingReview`); adding more
   (context bloat, tool-error storms, …) is a `SessionReview` trait impl, no
   dispatch changes and no extra model call per dimension.
@@ -249,7 +249,7 @@ branch snapshots under `sessions/<id>.json`:
 - `/session fork` creates a child with the same transcript and clears its loop
   checkpoint; `/session list` and `/session open <id-prefix>` allow branch
   navigation.
-- Each turn records its admission session id and refuses a late commit after a
+- Each round records its admission session id and refuses a late commit after a
   session switch.
 
 Loop checkpoints record pursuit, current iteration, and final status (the
@@ -282,7 +282,7 @@ exact keys and defaults live in the
 
 **Overflow recovery** is the harness's own reactive backstop and has no separate
 page. If a provider reports context overflow *before* any `ToolCall` event, the
-runner may compact and retry the same logical turn once. Overflow *after* tool
+runner may compact and retry the same logical round once. Overflow *after* tool
 activity is terminal, so tool side effects are never replayed.
 
 ## Extension surfaces

@@ -43,7 +43,7 @@
 //!    looped read — it can only read something *different*. This is the rung
 //!    that breaks a loop a nudge failed to. Surgical: it leaves all other
 //!    reads, writes, and tools untouched.
-//! 3. **`Esc` / `abort` / `hard_stop_rounds`** — the hard backstops remain for
+//! 3. **`Esc` / `abort` / `hard_stop_turns`** — the hard backstops remain for
 //!    a turn that loops even past a block.
 //!
 //! A one-shot-per-signature latch keeps each rung from spamming. Block state is

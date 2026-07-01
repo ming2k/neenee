@@ -51,7 +51,7 @@ pub const DEFAULT_THRESHOLD: u32 = 3;
 /// [`GuardAction::Block`](crate::loop_guard::GuardAction::Block) — the read
 /// signature is masked for the rest of the turn so it physically cannot
 /// recur. Beyond this we stay silent and let the hard backstops
-/// (`hard_stop_rounds`, `abort`, `Esc`) take over.
+/// (`hard_stop_turns`, `abort`, `Esc`) take over.
 pub const DEFAULT_ESCALATE_AT: u32 = 6;
 
 /// Default path-bucket threshold: occurrences of the same *path bucket*

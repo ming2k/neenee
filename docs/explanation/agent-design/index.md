@@ -3,7 +3,7 @@
 This section is the design canon for neenee's agent — a bounded, tool-using,
 semi-autonomous coding agent. The pages here are not independent
 features; they are facets of one system. Read together they describe how a
-single agent turn is steered, gated, isolated, made durable, and kept honest.
+single agent round is steered, gated, isolated, made durable, and kept honest.
 
 For where these docs sit relative to the rest of `docs/explanation/` — the
 provider protocol layer and the terminal UI — see
@@ -17,30 +17,30 @@ variation on these themes rather than a one-off mechanism.
 
 | Theme | What it means | Where it shows up |
 |-------|---------------|-------------------|
-| **Capability and access gating** | One permission surface (`ToolAccess`, ordered `Read < Execute < Write`) feeds two gates: the per-agent `WriteScope` boundary and the permission broker. A tool declares its access tier once; both gates consult it. | [Harness architecture](harness.md), [Turns and rounds](turns-and-rounds.md), [MCP servers](mcp.md) |
+| **Capability and access gating** | One permission surface (`ToolAccess`, ordered `Read < Execute < Write`) feeds two gates: the per-agent `WriteScope` boundary and the permission broker. A tool declares its access tier once; both gates consult it. | [Harness architecture](harness.md), [Rounds and turns](rounds-and-turns.md), [MCP servers](mcp.md) |
 | **Isolation boundaries** | Failure in one component must not topple the rest. Envoys are read-only; failed MCP servers are quarantined; pursuit state is per-thread. | [Envoys](envoys.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
 | **Durable vs ephemeral state** | The harness decides per concern what survives a restart. The durable session preserves the recoverable scene; the model context is a request-scoped projection; envoy context is fresh per call. | [Session persistence](session-persistence.md), [Model context](model-context.md), [Envoys](envoys.md) |
 | **Streaming and event propagation** | One event type (`AgentEvent`) flows from the agent through orchestration to the TUI; envoys re-emit the same shapes wrapped as `SubTaskEvent`. One pipeline renders everything. | [Envoys](envoys.md), [Harness architecture](harness.md) |
-| **Fallback and degradation** | Every ideal path has a defined degradation: native tool calls fall back to text parsing; a missing MCP `inputSchema` defaults to `{"type":"object"}`; pursuit completion is deferred while checklist work remains. The system never silently relies on the happy path. | [Turns and rounds](turns-and-rounds.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
+| **Fallback and degradation** | Every ideal path has a defined degradation: native tool calls fall back to text parsing; a missing MCP `inputSchema` defaults to `{"type":"object"}`; pursuit completion is deferred while checklist work remains. The system never silently relies on the happy path. | [Rounds and turns](rounds-and-turns.md), [MCP servers](mcp.md), [Pursuits](pursuits.md) |
 | **Control plane vs domain** | The harness owns steering (mode, pursuit, retry, loop); providers and tools own I/O. `EnvoyTool` lives in the agent crate because spawning an envoy is steering, not a domain action. | [Harness architecture](harness.md), [Envoys](envoys.md) |
 
 ## The canon, in reading order
 
 A new contributor can read these top to bottom and end up with a complete
-model of one agent turn.
+model of one agent round.
 
 1. [Harness architecture](harness.md) — the control plane around every
-   provider call: turn execution, the two capability surfaces, the permission
+   provider call: round execution, the two capability surfaces, the permission
    broker, the durable session, context compaction, and safety bounds. Start
    here.
-2. [Turns and rounds](turns-and-rounds.md) — the two-layer execution model:
-   a turn as the user-perceived unit, a round as the ReAct loop iteration
+2. [Rounds and turns](rounds-and-turns.md) — the two-layer execution model:
+   a round as the user-perceived unit, a turn as the ReAct loop iteration
    inside it, and which concerns attach to each layer. Then the lifecycle
-   inside one round: declaration, gating, execution, and how outcomes
+   inside one turn: declaration, gating, execution, and how outcomes
    re-enter the conversation. This is the structural map the rest of the
    canon is built on.
 3. [Prompt and message assembly](prompt-assembly.md) — the integrating view of
-   what the model actually reads each turn: the system message recomposed from
+   what the model actually reads each round: the system message recomposed from
    live state, the user channel carrying genuine input alongside
    harness-injected steering, tools declared through the native schema surface
    rather than described in prose, and the provenance discipline that makes the
@@ -54,7 +54,7 @@ model of one agent turn.
    rebuilt system prompt, model-visible messages, tool schemas, assistant tool
    calls, tool results, and provider-specific serialization.
 6. [Pursuits](pursuits.md) — durable per-session objectives driven by the
-   `/pursue` stop-gate (within-turn continuation until the condition is met)
+   `/pursue` stop-gate (within-round continuation until the condition is met)
    and the `/repeat` cron scheduler. How the agent keeps working toward an
    objective across rounds and restarts.
 7. [Envoys](envoys.md) — the `envoy` tool's isolated child agent.
@@ -64,7 +64,7 @@ model of one agent turn.
 8. [MCP servers](mcp.md) — local stdio MCP servers as dynamically discovered
    tools. The reference for failure isolation and for how an extension surface
    reuses the same `Tool` trait and execution path as built-ins.
-9. [User questions](user-questions.md) — the `ask_user` tool that blocks a turn
+9. [User questions](user-questions.md) — the `ask_user` tool that blocks a round
    to resolve ambiguity. The reference for the oneshot-channel blocking
    pattern the permission broker also uses.
 10. [Skills](skills.md) — on-demand domain expertise: the two-channel model
@@ -72,7 +72,7 @@ model of one agent turn.
    cascade, and explicit versus implicit invocation. The reference for the
    extension surface that adds instructions rather than tools.
 11. [Lifecycle hooks](hooks.md) — user-configured actions that fire on the
-   agent's lifecycle events (tool call, turn end, session start, compaction).
+   agent's lifecycle events (tool call, round end, session start, compaction).
    One event axis with capability implied by the event; the reference for
    the extension surface that adds practice (format, CI gates, context
    injection) without touching the core loop.
@@ -94,14 +94,14 @@ deep-dive references, read as a pair:
     makes that accuracy visible. Read this to understand the unit the previous
     two layers operate on.
 
-## How a turn flows through the canon
+## How a round flows through the canon
 
-A single agent turn touches almost every page. Tracing it is the fastest way
+A single agent round touches almost every page. Tracing it is the fastest way
 to see how the canon fits together:
 
 ```text
 user message
-  └─ [Harness] execute_turn
+  └─ [Harness] execute_round
        ├─ [Session]   use the durable model window and projection metadata
        ├─ [Prompt]    rebuild system prompt and request-scoped model context
        └─ [Pursuits]  active pursuit injected into the prompt
@@ -117,8 +117,8 @@ user message
             └─ [User questions] if call is `ask_user`: block on oneshot
        └─ [Hooks] PostToolUse | PostToolUseFailure: inject context?
        └─ completion marker? [Pursuits] finalize on completion signal
-       └─ next tool round, or stop on final message / safety bound
-            └─ [Hooks] Stop gate composes with /pursue: deny? → another round
+       └─ next tool turn, or stop on final message / safety bound
+            └─ [Hooks] Stop gate composes with /pursue: deny? → another turn
 ```
 
 Every arrow is documented in one of the canon pages above.

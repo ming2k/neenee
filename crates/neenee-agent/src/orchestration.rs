@@ -6,8 +6,8 @@
 //! pruning), retry with exponential backoff, permission relay, the `/pursue`
 //! stop-gate driver, and the `/repeat` cron scheduler.
 //!
-//! Frontends drive the harness through [`execute_turn`],
-//! [`start_interactive_turn`], [`start_pursuit`], and
+//! Frontends drive the harness through [`execute_round`],
+//! [`start_interactive_round`], [`start_pursuit`], and
 //! [`start_repeat_scheduler`]. They own only the UI-specific input path (slash commands for the CLI, menus/dialogs for a
 //! future GUI); the actual turn machinery is shared here.
 //!
@@ -35,7 +35,7 @@ use neenee_core::{
     AgentEvent, AgentRequest, AgentResponse, CronExpr, HarnessError, HarnessSnapshot, ImagePart,
     InjectionKind, InjectionOrigin, Message, NoticeKind, NoticeSeverity, NoticeSource,
     NoticeSurface, PURSUIT_COMPLETE_MARKER, Provider, ProviderStreamEvent, Pursuit, Role,
-    TurnEvent,
+    RoundEvent,
 };
 use neenee_store::{
     RepeatStore,
@@ -46,12 +46,12 @@ use neenee_store::{
     },
 };
 
-/// Wrap a session-scoped [`TurnEvent`] in the [`AgentResponse::Turn`]
+/// Wrap a session-scoped [`RoundEvent`] in the [`AgentResponse::Round`]
 /// envelope (ADR-0017). Every per-turn emitter routes through this so the
 /// session id is attached uniformly, letting the TUI key transcript buffers
 /// by `session_id` and dispatch primary vs `/btw` side events correctly.
-pub fn turn(session_id: &str, event: TurnEvent) -> AgentResponse {
-    AgentResponse::Turn {
+pub fn turn(session_id: &str, event: RoundEvent) -> AgentResponse {
+    AgentResponse::Round {
         session_id: session_id.to_string(),
         event,
     }
@@ -441,7 +441,7 @@ pub fn send_harness_state(
 ) {
     let _ = tx.send(turn(
         session_id,
-        TurnEvent::HarnessState(HarnessSnapshot {
+        RoundEvent::HarnessState(HarnessSnapshot {
             pursuit: agent.get_pursuit(),
             loop_status: loop_status.into(),
             unattended: agent.get_unattended(),
@@ -467,18 +467,18 @@ pub fn emit_pursuit_updated(
     session_id: &str,
     pursuit: &Pursuit,
 ) {
-    let _ = tx.send(turn(session_id, TurnEvent::PursuitUpdated(pursuit.clone())));
+    let _ = tx.send(turn(session_id, RoundEvent::PursuitUpdated(pursuit.clone())));
 }
 
 #[derive(Clone)]
-pub struct TurnContext {
+pub struct RoundContext {
     pub agent: Arc<Agent>,
     pub history: Arc<tokio::sync::Mutex<Vec<Message>>>,
     pub tx: mpsc::UnboundedSender<AgentResponse>,
     pub token: CancellationToken,
     pub session: Arc<SessionStore>,
     /// Session id this turn belongs to (ADR-0017). Tags every emitted
-    /// [`TurnEvent`] so the TUI routes primary vs `/btw` side events correctly.
+    /// [`RoundEvent`] so the TUI routes primary vs `/btw` side events correctly.
     pub session_id: String,
     pub projection: ContextProjectionSettings,
     pub retry_max_attempts: usize,
@@ -486,7 +486,7 @@ pub struct TurnContext {
     pub retry_max_ms: u64,
 }
 
-pub struct TurnInput {
+pub struct RoundInput {
     pub prompt: String,
     pub hidden: bool,
     pub display_prompt: Option<String>,
@@ -495,7 +495,7 @@ pub struct TurnInput {
 }
 
 #[derive(Clone)]
-pub struct InteractiveTurnContext {
+pub struct InteractiveRoundContext {
     pub agent: Arc<Agent>,
     pub history: Arc<tokio::sync::Mutex<Vec<Message>>>,
     pub tx: mpsc::UnboundedSender<AgentResponse>,
@@ -503,7 +503,7 @@ pub struct InteractiveTurnContext {
     pub generation_counter: Arc<AtomicU64>,
     pub session: Arc<SessionStore>,
     /// Session id this turn belongs to (ADR-0017). Tags every emitted
-    /// [`TurnEvent`] so the TUI routes primary vs `/btw` side events correctly.
+    /// [`RoundEvent`] so the TUI routes primary vs `/btw` side events correctly.
     pub session_id: String,
     pub projection: ContextProjectionSettings,
     pub retry_max_attempts: usize,
@@ -511,7 +511,7 @@ pub struct InteractiveTurnContext {
     pub retry_max_ms: u64,
 }
 
-pub async fn start_interactive_turn(context: InteractiveTurnContext, input: TurnInput) {
+pub async fn start_interactive_round(context: InteractiveRoundContext, input: RoundInput) {
     let token = CancellationToken::new();
     let generation = context.generation_counter.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(previous) = context.token_slot.write().await.replace(token.clone()) {
@@ -522,13 +522,13 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
     }
     let _ = context.tx.send(turn(
         &context.session_id,
-        TurnEvent::Activity("starting request".to_string()),
+        RoundEvent::Activity("starting request".to_string()),
     ));
 
     tokio::spawn(async move {
         send_harness_state(&context.tx, &context.session_id, &context.agent, "running");
-        let result = execute_turn(
-            TurnContext {
+        let result = execute_round(
+            RoundContext {
                 agent: context.agent.clone(),
                 history: context.history,
                 tx: context.tx.clone(),
@@ -549,13 +549,13 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
             Err(HarnessError::Interrupted) if is_current => {
                 let _ = context.tx.send(turn(
                     &context.session_id,
-                    TurnEvent::Text("... [Interrupted]".to_string()),
+                    RoundEvent::Text("... [Interrupted]".to_string()),
                 ));
             }
             Err(error) if is_current => {
                 let _ = context.tx.send(turn(
                     &context.session_id,
-                    TurnEvent::Error(error.to_string()),
+                    RoundEvent::Error(error.to_string()),
                 ));
             }
             Err(_) => {}
@@ -568,11 +568,11 @@ pub async fn start_interactive_turn(context: InteractiveTurnContext, input: Turn
     });
 }
 
-pub async fn execute_turn(
-    context: TurnContext,
-    mut input: TurnInput,
+pub async fn execute_round(
+    context: RoundContext,
+    mut input: RoundInput,
 ) -> Result<bool, HarnessError> {
-    let TurnContext {
+    let RoundContext {
         agent,
         history,
         tx,
@@ -591,7 +591,7 @@ pub async fn execute_turn(
     agent.bump_turn();
     let _ = tx.send(turn(
         &session_id,
-        TurnEvent::Activity("saving request".to_string()),
+        RoundEvent::Activity("saving request".to_string()),
     ));
 
     // UserPromptSubmit hooks (ADR-0025): a hook may deny the prompt or prepend
@@ -602,7 +602,7 @@ pub async fn execute_turn(
             crate::hooks::UserPromptVerdict::Deny(reason) => {
                 let _ = tx.send(turn(
                     &session_id,
-                    TurnEvent::Text(format!("Prompt blocked by hook: {reason}")),
+                    RoundEvent::Text(format!("Prompt blocked by hook: {reason}")),
                 ));
                 return Ok(true);
             }
@@ -659,18 +659,18 @@ pub async fn execute_turn(
     // tools and then crashed rewinds the transcript to the previous turn,
     // leaving it out of sync with the filesystem. The closure clones the
     // session `Arc` and the message slice (the `BoxFuture` is `'static`), then
-    // delegates to `SessionStore::append_round`, which writes only the delta.
+    // delegates to `SessionStore::append_turn`, which writes only the delta.
     {
         let session_for_round = Arc::clone(&session);
-        agent.set_round_persist(Arc::new(move |messages: &[Message]| {
+        agent.set_turn_persist(Arc::new(move |messages: &[Message]| {
             let session = Arc::clone(&session_for_round);
             let snapshot = messages.to_vec();
-            Box::pin(async move { session.append_round(&snapshot).await })
+            Box::pin(async move { session.append_turn(&snapshot).await })
         }));
     }
     let _ = tx.send(turn(
         &session_id,
-        TurnEvent::Activity("preparing context".to_string()),
+        RoundEvent::Activity("preparing context".to_string()),
     ));
     // Cheap tool-result pruning to relieve pressure before considering a full
     // compaction. Gated by the model-relative `prune_utilization` threshold
@@ -684,10 +684,10 @@ pub async fn execute_turn(
     if estimate_tokens(&turn_history) > projection.budget.compaction_threshold_tokens {
         let _ = tx.send(turn(
             &session_id,
-            TurnEvent::Activity("compacting context".to_string()),
+            RoundEvent::Activity("compacting context".to_string()),
         ));
         let extra = agent.fire_pre_compact().await;
-        if let Some(checkpoint) = compact_turn_history(
+        if let Some(checkpoint) = compact_round_history(
             &mut turn_history,
             &session,
             &projection,
@@ -701,7 +701,7 @@ pub async fn execute_turn(
         agent.fire_post_compact().await;
         let _ = tx.send(turn(
             &session_id,
-            TurnEvent::Activity("preparing context".to_string()),
+            RoundEvent::Activity("preparing context".to_string()),
         ));
     }
 
@@ -734,7 +734,7 @@ pub async fn execute_turn(
                 preserve_turns: projection.preserve_turns.max(1),
                 ..projection.clone()
             };
-            if compact_turn_history(
+            if compact_round_history(
                 &mut turn_history,
                 &session,
                 &overflow_settings,
@@ -746,7 +746,7 @@ pub async fn execute_turn(
             {
                 compacted_after_overflow = true;
                 if streamed_text.swap(false, Ordering::SeqCst) {
-                    let _ = tx.send(turn(&session_id, TurnEvent::StreamDiscard));
+                    let _ = tx.send(turn(&session_id, RoundEvent::StreamDiscard));
                 }
                 if let Some(checkpoint) = session.last_projection().await {
                     send_compaction(&tx, &session_id, &checkpoint);
@@ -783,7 +783,7 @@ pub async fn execute_turn(
             )));
         }
         if streamed_text.swap(false, Ordering::SeqCst) {
-            let _ = tx.send(turn(&session_id, TurnEvent::StreamDiscard));
+            let _ = tx.send(turn(&session_id, RoundEvent::StreamDiscard));
         }
         let base_ms = retry_delay_ms(attempt, retry_after_ms, retry_base_ms, retry_max_ms);
         // Apply equal jitter (half fixed, half random) to de-synchronise
@@ -802,7 +802,7 @@ pub async fn execute_turn(
         );
         let _ = tx.send(turn(
             &session_id,
-            TurnEvent::Notice(
+            RoundEvent::Notice(
                 neenee_core::AgentNotice::new(
                     NoticeKind::ProviderRetry,
                     NoticeSeverity::Warning,
@@ -819,7 +819,7 @@ pub async fn execute_turn(
         ));
         let _ = tx.send(turn(
             &session_id,
-            TurnEvent::RetryScheduled {
+            RoundEvent::RetryScheduled {
                 attempt: attempt + 1,
                 max_attempts: retry_limit,
                 delay_ms,
@@ -837,7 +837,7 @@ pub async fn execute_turn(
     // out of the context, revert the session store to its pre-turn state, and
     // hand the prompt back to the TUI for re-editing. Returning `Ok(false)`
     // (rather than propagating `Err(Interrupted)`) keeps
-    // `start_interactive_turn`'s interrupt handler from emitting the generic
+    // `start_interactive_round`'s interrupt handler from emitting the generic
     // "... [Interrupted]" notice — the unsend is the user's intent here.
     //
     // Billing caveat (see docs/explanation/interrupt-semantics.md): the
@@ -858,7 +858,7 @@ pub async fn execute_turn(
             session.replace_messages(turn_history).await?;
             let _ = tx.send(turn(
                 &session_id,
-                TurnEvent::UnsentInput {
+                RoundEvent::UnsentInput {
                     prompt: unsent_prompt,
                     images: unsent_images,
                 },
@@ -871,7 +871,7 @@ pub async fn execute_turn(
     }
     let _ = tx.send(turn(
         &session_id,
-        TurnEvent::Activity("saving response".to_string()),
+        RoundEvent::Activity("saving response".to_string()),
     ));
     *history.lock().await = turn_history.clone();
     session.replace_messages(turn_history).await?;
@@ -892,7 +892,7 @@ pub async fn execute_turn(
             Err(error) => {
                 let _ = tx.send(turn(
                     &session_id,
-                    TurnEvent::Error(format!("Failed to mark pursuit complete: {error}")),
+                    RoundEvent::Error(format!("Failed to mark pursuit complete: {error}")),
                 ));
             }
         }
@@ -910,12 +910,12 @@ pub async fn execute_turn(
         .trim()
         .to_string();
     if !visible.is_empty() && !streamed_text.load(Ordering::SeqCst) {
-        let _ = tx.send(turn(&session_id, TurnEvent::Text(visible)));
+        let _ = tx.send(turn(&session_id, RoundEvent::Text(visible)));
     }
     if requested_completion && !completed {
         let _ = tx.send(turn(
             &session_id,
-            TurnEvent::Text(
+            RoundEvent::Text(
                 "Pursuit completion marker ignored: no active pursuit is set.".to_string(),
             ),
         ));
@@ -923,7 +923,7 @@ pub async fn execute_turn(
     if completed {
         let _ = tx.send(turn(
             &session_id,
-            TurnEvent::Text("Pursuit completed.".to_string()),
+            RoundEvent::Text("Pursuit completed.".to_string()),
         ));
     }
 
@@ -941,7 +941,7 @@ pub async fn execute_turn(
         agent.clear_todos();
         let _ = tx.send(turn(
             &session_id,
-            TurnEvent::TodosUpdated(neenee_core::TodoList::default()),
+            RoundEvent::TodosUpdated(neenee_core::TodoList::default()),
         ));
         if let Err(err) = session.set_todos(neenee_core::TodoList::default()).await {
             tracing::warn!(error = %err, "could not clear todos");
@@ -980,7 +980,7 @@ pub fn retry_delay_ms(
 /// while still being jittered to avoid thundering-herd on its expiry.
 ///
 /// `roll` is an injected `[0, base] -> u64` closure so this stays a pure,
-/// deterministic, unit-testable function; the only call site (`execute_turn`)
+/// deterministic, unit-testable function; the only call site (`execute_round`)
 /// supplies `fastrand`. A `base` of 0 is degenerate and passed through unchanged.
 pub fn apply_jitter_ms(base: u64, roll: impl Fn(u64) -> u64) -> u64 {
     if base == 0 {
@@ -1013,7 +1013,7 @@ pub fn relay_agent_event(
     streamed_text: &std::sync::atomic::AtomicBool,
 ) {
     let response = match event {
-        AgentEvent::Notice(notice) => turn(session_id, TurnEvent::Notice(notice)),
+        AgentEvent::Notice(notice) => turn(session_id, RoundEvent::Notice(notice)),
         AgentEvent::ModelRequestStarted { tool_round } => {
             // Structured round signal first, so the Activity modal can show
             // `turn N · round M · waiting for model` with the round as a
@@ -1021,39 +1021,39 @@ pub fn relay_agent_event(
             // string. The bare status follows as the `Activity` below.
             let _ = tx.send(turn(
                 session_id,
-                TurnEvent::RoundStarted { round: tool_round },
+                RoundEvent::TurnStarted { turn: tool_round },
             ));
             turn(
                 session_id,
-                TurnEvent::Activity("waiting for model".to_string()),
+                RoundEvent::Activity("waiting for model".to_string()),
             )
         }
         AgentEvent::AssistantDelta { delta, start } => {
             if start {
-                let _ = tx.send(turn(session_id, TurnEvent::StreamStart));
+                let _ = tx.send(turn(session_id, RoundEvent::StreamStart));
             }
             streamed_text.store(true, Ordering::SeqCst);
-            turn(session_id, TurnEvent::StreamDelta(delta))
+            turn(session_id, RoundEvent::StreamDelta(delta))
         }
         AgentEvent::AssistantEnd(content) => turn(
             session_id,
-            TurnEvent::StreamEnd(
+            RoundEvent::StreamEnd(
                 content
                     .replace(PURSUIT_COMPLETE_MARKER, "")
                     .trim()
                     .to_string(),
             ),
         ),
-        AgentEvent::AssistantDiscard => turn(session_id, TurnEvent::StreamDiscard),
+        AgentEvent::AssistantDiscard => turn(session_id, RoundEvent::StreamDiscard),
         AgentEvent::ReasoningDelta { delta, start } => {
             if start {
-                let _ = tx.send(turn(session_id, TurnEvent::StreamStart));
+                let _ = tx.send(turn(session_id, RoundEvent::StreamStart));
             }
             streamed_text.store(true, Ordering::SeqCst);
-            turn(session_id, TurnEvent::StreamReasoningDelta(delta))
+            turn(session_id, RoundEvent::StreamReasoningDelta(delta))
         }
         AgentEvent::ReasoningEnd(content) => {
-            turn(session_id, TurnEvent::StreamReasoningEnd(content))
+            turn(session_id, RoundEvent::StreamReasoningEnd(content))
         }
         AgentEvent::ToolCall {
             id,
@@ -1061,7 +1061,7 @@ pub fn relay_agent_event(
             arguments,
         } => turn(
             session_id,
-            TurnEvent::ToolCall {
+            RoundEvent::ToolCall {
                 id,
                 name,
                 arguments,
@@ -1075,7 +1075,7 @@ pub fn relay_agent_event(
             duration_ms,
         } => turn(
             session_id,
-            TurnEvent::ToolResult {
+            RoundEvent::ToolResult {
                 id,
                 name,
                 output,
@@ -1084,21 +1084,21 @@ pub fn relay_agent_event(
             },
         ),
         AgentEvent::ToolCancelled { id, name } => {
-            turn(session_id, TurnEvent::ToolCancelled { id, name })
+            turn(session_id, RoundEvent::ToolCancelled { id, name })
         }
         AgentEvent::ToolStream { id, stream } => {
-            turn(session_id, TurnEvent::ToolStream { id, stream })
+            turn(session_id, RoundEvent::ToolStream { id, stream })
         }
-        AgentEvent::PursuitUpdated(pursuit) => turn(session_id, TurnEvent::PursuitUpdated(pursuit)),
-        AgentEvent::TodosUpdated(todos) => turn(session_id, TurnEvent::TodosUpdated(todos)),
+        AgentEvent::PursuitUpdated(pursuit) => turn(session_id, RoundEvent::PursuitUpdated(pursuit)),
+        AgentEvent::TodosUpdated(todos) => turn(session_id, RoundEvent::TodosUpdated(todos)),
         AgentEvent::UnattendedChanged(enabled) => {
-            turn(session_id, TurnEvent::UnattendedChanged(enabled))
+            turn(session_id, RoundEvent::UnattendedChanged(enabled))
         }
         AgentEvent::SessionReview { alert } => {
             if !alert.trim().is_empty() {
                 let _ = tx.send(turn(
                     session_id,
-                    TurnEvent::Notice(
+                    RoundEvent::Notice(
                         neenee_core::AgentNotice::new(
                             neenee_core::NoticeKind::ReviewAlert,
                             neenee_core::NoticeSeverity::Warning,
@@ -1110,21 +1110,21 @@ pub fn relay_agent_event(
                     ),
                 ));
             }
-            turn(session_id, TurnEvent::SessionReview { alert })
+            turn(session_id, RoundEvent::SessionReview { alert })
         }
         AgentEvent::PermissionRequest(request) => {
-            turn(session_id, TurnEvent::PermissionRequest(request))
+            turn(session_id, RoundEvent::PermissionRequest(request))
         }
         AgentEvent::UserQuestionRequest(request) => {
-            turn(session_id, TurnEvent::UserQuestionRequest(request))
+            turn(session_id, RoundEvent::UserQuestionRequest(request))
         }
-        AgentEvent::InputRequest(request) => turn(session_id, TurnEvent::InputRequest(request)),
+        AgentEvent::InputRequest(request) => turn(session_id, RoundEvent::InputRequest(request)),
         AgentEvent::Envoy {
             parent_call_id,
             event,
         } => turn(
             session_id,
-            TurnEvent::Envoy {
+            RoundEvent::Envoy {
                 parent_call_id,
                 event,
             },
@@ -1133,7 +1133,7 @@ pub fn relay_agent_event(
     let _ = tx.send(response);
 }
 
-pub async fn compact_turn_history(
+pub async fn compact_round_history(
     history: &mut Vec<Message>,
     session: &SessionStore,
     settings: &ContextProjectionSettings,
@@ -1207,7 +1207,7 @@ pub fn send_compaction(
 ) {
     let _ = tx.send(turn(
         session_id,
-        TurnEvent::Compacted {
+        RoundEvent::Compacted {
             archived_messages: checkpoint.archived_messages,
             before_chars: checkpoint.before_chars,
             after_chars: checkpoint.after_chars,
@@ -1236,7 +1236,7 @@ pub struct PursuitContext {
 /// The gate (`Agent::pursuit_continuation`) re-injects the condition and
 /// forces additional rounds *within* the turn until the model signals
 /// completion, the safety cap is hit, or the pursuit is interrupted — so a
-/// single `execute_turn` here runs to completion instead of looping whole
+/// single `execute_round` here runs to completion instead of looping whole
 /// turns (the old `/loop` model).
 ///
 /// Terminates when:
@@ -1259,7 +1259,7 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
     send_harness_state(&context.tx, &context.session_id, &context.agent, "pursue");
 
     tokio::spawn(async move {
-        // Arm the stop-gate so `execute_turn`'s turn loop keeps driving toward
+        // Arm the stop-gate so `execute_round`'s turn loop keeps driving toward
         // the condition instead of ending on the first stop. The gate
         // self-disarms on cap/completion; we also disarm below as a backstop.
         context.agent.arm_pursuit();
@@ -1282,8 +1282,8 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
             condition = condition,
             marker = PURSUIT_COMPLETE_MARKER,
         );
-        let outcome = execute_turn(
-            TurnContext {
+        let outcome = execute_round(
+            RoundContext {
                 agent: context.agent.clone(),
                 history: context.history.clone(),
                 tx: context.tx.clone(),
@@ -1295,7 +1295,7 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                 retry_base_ms: context.retry_base_ms,
                 retry_max_ms: context.retry_max_ms,
             },
-            TurnInput {
+            RoundInput {
                 prompt,
                 hidden: true,
                 display_prompt: None,
@@ -1317,7 +1317,7 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                     .await;
                 let _ = context.tx.send(turn(
                     &context.session_id,
-                    TurnEvent::Text("Pursuit complete.".to_string()),
+                    RoundEvent::Text("Pursuit complete.".to_string()),
                 ));
             }
             Ok(false) => {
@@ -1335,7 +1335,7 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                     .await;
                 let _ = context.tx.send(turn(
                     &context.session_id,
-                    TurnEvent::Text(
+                    RoundEvent::Text(
                         "Pursuit stopped: safety cap reached or no completion signal.".to_string(),
                     ),
                 ));
@@ -1352,7 +1352,7 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                     .await;
                 let _ = context.tx.send(turn(
                     &context.session_id,
-                    TurnEvent::Text("Pursuit interrupted.".to_string()),
+                    RoundEvent::Text("Pursuit interrupted.".to_string()),
                 ));
             }
             Err(error) => {
@@ -1367,7 +1367,7 @@ pub async fn start_pursuit(context: PursuitContext, condition: String) {
                     .await;
                 let _ = context.tx.send(turn(
                     &context.session_id,
-                    TurnEvent::Error(error.to_string()),
+                    RoundEvent::Error(error.to_string()),
                 ));
             }
         }

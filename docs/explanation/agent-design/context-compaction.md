@@ -11,7 +11,7 @@ unlike pruning, it **surfaces a transcript notice**.
 
 This page is the design reference for compaction. For the cheaper layer that
 runs first, see [Context pruning](context-pruning.md); for where both sit in a
-turn, see [Harness architecture](harness.md#context-projection).
+round, see [Harness architecture](harness.md#context-projection).
 
 ## Thresholds are model-relative
 
@@ -64,7 +64,7 @@ place.
 The entry point is `compact_turn_history`
 (`neenee-agent/src/orchestration.rs`), which delegates the heavy lifting to
 `run_compaction` (`neenee-store/src/session.rs`). The boundary is the **start of
-an older complete user turn** — never mid-turn — so the model-visible history
+an older complete user round** — never mid-round — so the model-visible history
 always begins coherently.
 
 1. **Select.** `CompactionSelection` splits the history into an archived *head*
@@ -79,9 +79,9 @@ always begins coherently.
    system never depends on the happy path.
 3. **Reassemble.** The summary becomes a checkpoint message prefixed with
    `CHECKPOINT_HEADER` (`"[Conversation checkpoint] …"`). That header doubles as
-   a classifier: it excludes the checkpoint from the user-turn count and lets
+   a classifier: it excludes the checkpoint from the user-round count and lets
    the next compaction find and extend the prior summary. System messages are
-   **regenerated** on the next turn rather than archived into model context.
+   **regenerated** on the next round rather than archived into model context.
 
 The result is a `ContextProjectionResult` (model window = checkpoint + tail;
 archived originals = the original head), committed durably exactly like a
@@ -118,7 +118,7 @@ that notice knows a real summarization happened.
   on demand, independent of the threshold.
 - **Reactive overflow recovery.** If a provider reports context overflow
   *before* any `ToolCall` event, the runner may compact and retry the same
-  logical turn once (`compacted_after_overflow`). Overflow *after* tool activity
+  logical round once (`compacted_after_overflow`). Overflow *after* tool activity
   is terminal, so tool side effects are never replayed.
 
 ## Configuration

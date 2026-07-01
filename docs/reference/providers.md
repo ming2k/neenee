@@ -114,7 +114,7 @@ wrapped in `RetryableError` (`crates/neenee-core/src/error.rs`) by
 The marker prefix
 is `[NEENEE_RETRYABLE]`.
 
-Retry is a turn-level loop inside `execute_turn`
+Retry is a round-level loop inside `execute_round`
 (`crates/neenee-agent/src/orchestration.rs`),
 not a provider decorator. Configuration:
 
@@ -128,14 +128,14 @@ Backoff is computed by `retry_delay_ms` as exponential
 `base_ms * 2^(attempt-1)` capped at `max_ms`. Server `Retry-After` or
 `retry-after-ms` headers (parsed by `retry_after_ms` in
 `crates/neenee-providers/src/lib.rs`) take
-priority. Once any tool has run in the current turn, retryable errors become
+priority. Once any tool has run in the current round, retryable errors become
 terminal so tool side effects are never replayed.
 
 ## See also
 
 - [Provider capabilities](../explanation/provider-capabilities.md) — why
   providers differ on tool and reasoning support
-- [Tool rounds](../explanation/agent-design/turns-and-rounds.md) — how the universal
+- [Tool rounds](../explanation/agent-design/rounds-and-turns.md) — how the universal
   fallback covers providers without native tools
 - [How to add a provider](../how-to/add-a-provider.md) — implementing a new
   adapter

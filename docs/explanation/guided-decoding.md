@@ -8,7 +8,7 @@ itself.
 For the higher-level capability model, see
 [Provider capabilities](provider-capabilities.md). For where neenee's
 adapters assume this layer is present, see
-[Tool rounds](agent-design/turns-and-rounds.md).
+[Tool rounds](agent-design/rounds-and-turns.md).
 
 ## The problem
 
@@ -21,7 +21,7 @@ Two failure modes follow:
 
 - **Syntactic.** The model emits `{"path": "src/lib.rs"` (missing closing
   brace) or `{"path": src/lib.rs}` (unquoted value). The bytes are not
-  valid JSON. `serde_json::from_str` fails and the turn aborts.
+  valid JSON. `serde_json::from_str` fails and the round aborts.
 - **Semantic.** The model emits `{"path": "src/lib.rs", "extra": 7}` against
   a schema that disallows `additionalProperties`. The JSON parses but the
   tool rejects the call.
@@ -120,7 +120,7 @@ with the messages and tools, producing the prompt string the model
 actually sees. Every model family has its own tool-use template:
 
 - Hermes-style models emit `<tool_call>...</tool_call>` blocks inside the
-  assistant turn.
+  assistant round.
 - Llama-3 tool models use a special `<|python_tag|>` sentinel followed by
   a JSON dict.
 - Qwen function-calling models wrap calls in `<tool_call>` tags.
@@ -150,7 +150,7 @@ asserting two things about the upstream runtime:
 If either assumption fails, the model may still produce tool calls (its
 weights are tool-tuned) but with no syntactic guarantee. The client then
 faces occasional parse failures. neenee's universal fallback
-([Tool rounds](agent-design/turns-and-rounds.md)) is the graceful degradation for
+([Tool rounds](agent-design/rounds-and-turns.md)) is the graceful degradation for
 exactly this case: when guided decoding is absent or unreliable, the agent
 parses JSON out of assistant text and accepts that some calls will be
 malformed.
@@ -178,7 +178,7 @@ same API regardless of vendor.
 
 - [Provider capabilities](provider-capabilities.md) — how neenee maps this
   layer into its adapter taxonomy
-- [Tool rounds](agent-design/turns-and-rounds.md) — what neenee does with the tool calls
+- [Tool rounds](agent-design/rounds-and-turns.md) — what neenee does with the tool calls
   this layer produces
 - [Request flow](request-flow.md) — how the resulting `tool_calls` field
   drives the ReAct loop

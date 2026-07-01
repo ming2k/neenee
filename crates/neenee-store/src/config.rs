@@ -32,7 +32,7 @@ pub const THINKING_KEY: &str = "thinking";
 /// # means no hard stop — an opt-in execution budget only. This is the sole
 /// # turn cap; the loop otherwise runs until the model stops, the user
 /// # interrupts, or context compaction cannot relieve pressure (ADR-0009).
-/// # hard_stop_rounds = 0
+/// # hard_stop_turns = 0
 ///
 /// # Anti-anchoring nudge for the deterministic read-loop guard. Default
 /// # disabled — opt in here or via the `/config` modal. See [`NudgeConfig`].
@@ -44,8 +44,8 @@ pub const THINKING_KEY: &str = "thinking";
 pub struct PrincipalConfig {
     /// Opt-in hard-stop budget: abort a turn after this many total tool
     /// rounds. `0` (the default) means uncapped. Mutated at runtime via
-    /// `Agent::set_hard_stop_rounds`.
-    pub hard_stop_rounds: usize,
+    /// `Agent::set_hard_stop_turns`.
+    pub hard_stop_turns: usize,
     /// Whether the model may supply stdin bytes for a `bash` command it emits
     /// (the opt-in "automatic flow" path, L3.5 α). Default `false`: the bash
     /// tool schema exposes no `stdin` parameter and a command that needs input
@@ -92,12 +92,12 @@ pub struct TuiConfig {
     pub default_expanded: HashMap<String, bool>,
     /// How the transcript message stream is arranged. Recognized values
     /// (case-insensitive): `"compact"` (default — the original flush-stack
-    /// layout) and `"round_band"` (each tool round is grouped into a labelled
+    /// layout) and `"turn_band"` (each tool round is grouped into a labelled
     /// band with a header row). Unknown / empty values fall back to compact.
     ///
     /// ```toml
     /// [tui]
-    /// transcript_layout = "round_band"
+    /// transcript_layout = "turn_band"
     /// ```
     pub transcript_layout: String,
 }
@@ -747,36 +747,36 @@ mod tests {
     fn agent_table_round_trips_through_toml() {
         // The `[principal]` table must round-trip: partial TOML keeps defaults,
         // full TOML preserves explicit overrides. Legacy `[agent.review]`
-        // sub-tables (ADR-0016) are accepted but ignored — `hard_stop_rounds`
+        // sub-tables (ADR-0016) are accepted but ignored — `hard_stop_turns`
         // now lives directly under `[principal]` (ADR-0018).
         let toml_full = r#"
             [principal]
-            hard_stop_rounds = 40
+            hard_stop_turns = 40
         "#;
         let cfg: Config = toml::from_str(toml_full).unwrap();
-        assert_eq!(cfg.principal.hard_stop_rounds, 40);
+        assert_eq!(cfg.principal.hard_stop_turns, 40);
 
         // Missing `[principal]` table → defaults match the documented values.
         let cfg: Config = toml::from_str("").unwrap();
-        assert_eq!(cfg.principal.hard_stop_rounds, 0);
+        assert_eq!(cfg.principal.hard_stop_turns, 0);
 
         // A legacy `[agent.review]` block no longer maps to anything; it must
         // not break parsing (unknown sub-tables are ignored) and the new
         // direct field still round-trips.
         let toml_legacy = r#"
             [agent.review]
-            review_start_round = 64
-            hard_stop_rounds = 99
+            review_start_turn = 64
+            hard_stop_turns = 99
         "#;
         let cfg: Config = toml::from_str(toml_legacy).unwrap();
-        assert_eq!(cfg.principal.hard_stop_rounds, 0);
+        assert_eq!(cfg.principal.hard_stop_turns, 0);
 
         // Round-trip through save+load format (serialize then parse).
         let mut cfg = Config::default();
-        cfg.principal.hard_stop_rounds = 99;
+        cfg.principal.hard_stop_turns = 99;
         let serialised = toml::to_string(&cfg).unwrap();
         let parsed: Config = toml::from_str(&serialised).unwrap();
-        assert_eq!(parsed.principal.hard_stop_rounds, 99);
+        assert_eq!(parsed.principal.hard_stop_turns, 99);
     }
 
     #[test]

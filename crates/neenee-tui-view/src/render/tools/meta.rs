@@ -1,5 +1,5 @@
 //! Presenters for orchestration / meta tools that act on session state rather
-//! than the filesystem: `todo`, `envoy`, `use_skill`, `create_project`.
+//! than the filesystem: `todo`, `envoy`, `use_skill`.
 
 use super::{ToolPresenter, ToolView, truncate};
 
@@ -31,15 +31,5 @@ impl ToolPresenter for UseSkillPresenter {
         view.str("name")
             .map(|name| format!("Use skill {}", name))
             .unwrap_or_else(|| "Use skill".to_string())
-    }
-}
-
-pub struct CreateProjectPresenter;
-
-impl ToolPresenter for CreateProjectPresenter {
-    fn summary(&self, view: &ToolView) -> String {
-        view.str("name")
-            .map(|name| format!("Create project {}", name))
-            .unwrap_or_else(|| "Create project".to_string())
     }
 }

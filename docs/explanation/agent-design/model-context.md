@@ -3,7 +3,7 @@
 The model context is the request-scoped view neenee sends to a provider. It is
 derived from the durable session, but it is not the durable session itself. The
 provider receives only the current projection: a rebuilt system prompt, the
-model window, and the tool catalog valid for this round.
+model window, and the tool catalog valid for this turn.
 
 For the persistent side of the same boundary, see
 [Session persistence](session-persistence.md). For the prompt assembly rules
@@ -11,9 +11,9 @@ that feed this context, see [Prompt and message assembly](prompt-assembly.md).
 
 ## Stateless Provider Requests
 
-LLM providers are treated as stateless. Every round sends enough context for the
+LLM providers are treated as stateless. Every turn sends enough context for the
 provider to answer without relying on memory from an earlier HTTP request. The
-next round resends the current model window with any newly appended assistant
+next turn resends the current model window with any newly appended assistant
 messages and tool results.
 
 That is why the "context sent to the LLM" is a projection rather than a storage
@@ -43,7 +43,7 @@ Tool definitions and tool usage are separate parts of the context.
 
 The **tool schema** tells the model what it may call. It includes the tool name,
 human-readable description, and structured parameter schema. This is the
-declaration surface; it is resent every round because the provider is stateless.
+declaration surface; it is resent every turn because the provider is stateless.
 
 The **tool trace** lives in messages. When the model calls a tool, the assistant
 message records the tool name and JSON arguments. A read tool call can therefore
@@ -95,7 +95,7 @@ next provider call; the durable session is optimized for full resume and audit.
 
 ## Mental Model
 
-One round can be read as this flow:
+One turn can be read as this flow:
 
 ```text
 durable session

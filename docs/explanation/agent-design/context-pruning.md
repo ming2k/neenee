@@ -9,7 +9,7 @@ transcript notice, only a `debug` trace.
 
 This page is the design reference for pruning. For the summarizing layer that
 takes over when pruning is no longer enough, see
-[Context compaction](context-compaction.md); for where both sit in the turn,
+[Context compaction](context-compaction.md); for where both sit in the round,
 see [Harness architecture](harness.md#context-projection).
 
 ## What it relieves
@@ -76,7 +76,7 @@ prevents `envoy` from spawning `envoy`).
 
 ## Two entry points, one threshold
 
-Pruning runs at two moments in a turn. Both are gated on the **same**
+Pruning runs at two moments in a round. Both are gated on the **same**
 model-relative trigger — `prune_threshold_tokens`, i.e. `prune_utilization`
 (0.65) of the active model's context window (see
 [compaction](context-compaction.md#thresholds-are-model-relative) for how the
@@ -88,24 +88,24 @@ chars/4 estimate — see
 
 | Entry point | When | Code |
 |-------------|------|------|
-| **Pre-turn** | Once at the start of a turn, before the agentic loop begins. Relieves pressure the new user message plus history may already have built up. | `prune_and_commit` in `neenee-agent/src/orchestration.rs` |
-| **Mid-turn** | Between tool rounds *inside* the loop, when a single turn fans out across many tool calls and pressure climbs mid-flight. | `MidTurnPruneProjectionGate` (impl of `ContextProjectionGate`), driven by `Agent::project_context_if_needed` |
+| **Pre-round** | Once at the start of a round, before the agentic loop begins. Relieves pressure the new user message plus history may already have built up. | `prune_and_commit` in `neenee-agent/src/orchestration.rs` |
+| **Mid-round** | Between tool turns *inside* the loop, when a single round fans out across many tool calls and pressure climbs mid-flight. | `MidTurnPruneProjectionGate` (impl of `ContextProjectionGate`), driven by `Agent::project_context_if_needed` |
 
-> **History.** The pre-turn entry point originally ran on *every* turn with no
+> **History.** The pre-round entry point originally ran on *every* round with no
 > pressure check, so on a 1M-token model it fired at a few percent of the
 > window — far below the documented 65%. ADR-0021 gated it to match the
-> mid-turn gate and the `prune_utilization` design. (The token count that gate
+> mid-round gate and the `prune_utilization` design. (The token count that gate
 > compares against is measured by the layered policy in
 > [ADR-0044](../../adr/0044-layered-token-accounting.md) — see
 > [Token accounting](token-accounting.md).)
 
 ## Implicit by design
 
-Pruning preserves conversation continuity completely: the turn structure and
+Pruning preserves conversation continuity completely: the round structure and
 the `tool_call_id` chain survive, and only stale tool *detail* is lost. It is
 therefore **silent** — `prune_and_commit` records a durable checkpoint and a
 `tracing::debug!` line, but does **not** emit `AgentResponse::Compacted`. The
-mid-turn gate was already silent. Only the summarizing
+mid-round gate was already silent. Only the summarizing
 [compaction](context-compaction.md) layer surfaces a transcript notice, so when
 a user sees "Compacted …" a real summarization happened, not a prune (ADR-0021).
 

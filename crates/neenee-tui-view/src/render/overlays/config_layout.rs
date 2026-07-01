@@ -40,7 +40,7 @@ fn options() -> [LayoutOption; 2] {
             description: "Original flush stack: tight gaps, batched tool calls",
         },
         LayoutOption {
-            config_value: "round_band",
+            config_value: "turn_band",
             label: "Round-band",
             description: "Each tool round grouped under a labelled header",
         },
@@ -89,7 +89,7 @@ pub fn draw_config_layout_modal(
 
     let current_value = match current {
         Strategy::Compact => "compact",
-        Strategy::RoundBand => "round_band",
+        Strategy::TurnBand => "turn_band",
     };
 
     for (i, opt) in options().iter().enumerate() {

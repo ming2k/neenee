@@ -8,15 +8,15 @@ conversation. For the tool's parameters and access class, see
 
 ## Why an envoy tool
 
-A single agent turn accumulates context: every file read, every grep result,
-every tool round stays in the transcript. For a large investigation that touches
+A single agent round accumulates context: every file read, every grep result,
+every tool turn stays in the transcript. For a large investigation that touches
 many unrelated corners of the codebase, one of two things happens — either the
 context fills with material only loosely related to the final answer, or the
 model spends turns re-reading things it already saw. An envoy gives the model
 a way to delegate the exploration:
 
 1. **Context isolation.** The envoy runs with a fresh two-message history
-   (its task prompt plus the system prompt). Its tool rounds never enter the
+   (its task prompt plus the system prompt). Its tool turns never enter the
    parent's transcript; only its final summary does.
 2. **Capability-bounded by construction.** The envoy receives only the tools
    its profile admits, scoped by a per-agent `WriteScope`, so it can only do
@@ -37,7 +37,7 @@ tool step's children, so `/resume` rebuilds the nested view later.
 
 Because the envoy's progress is interesting in real time (not just its final
 answer), the tool streams live rather than blocking until completion: every
-token and tool round the child produces is relayed to the parent TUI as it
+token and tool turn the child produces is relayed to the parent TUI as it
 happens. Input validation rejects only non-JSON or empty-after-trim fields; the
 length hint on the description is a model-facing nudge, not an enforced bound.
 
@@ -169,7 +169,7 @@ the exact child that surfaced it, while the child runs.
   `reply_user_question`, resolving the child's parked oneshot directly.
 
 Two channels, deliberately split: **steering** (`submit` an `AgentOp`) queues
-onto an inbox drained at the next tool-round boundary, so it can never
+onto an inbox drained at the next tool-turn boundary, so it can never
 interrupt a side effect mid-flight; **request/reply** resolves a parked oneshot
 immediately, since the child is already waiting on it.
 
@@ -177,7 +177,7 @@ The built-in profiles other than `INTERACTIVE` stay non-interactive, so in
 practice no nested request is surfaced today and the child's
 `set_unattended(true)` is a transitional gate rather than a load-bearing
 deadlock fix. The `INTERACTIVE` profile opts into `allow_user_interaction`, so
-its `ask_user` round-trip works through the handle directly.
+its `ask_user` turn-trip works through the handle directly.
 
 ## Runtime
 
@@ -233,25 +233,25 @@ trigger, and the partial transcript is preserved so the user can resume into the
 half-finished work. Only input-validation errors (bad JSON, missing fields)
 propagate as hard errors, because they have no partial transcript worth keeping.
 
-The envoy runs with its own independent cancellation. When the parent turn is
+The envoy runs with its own independent cancellation. When the parent round is
 interrupted, the parent simply stops awaiting the envoy and emits a
 cancellation for the call id; the TUI then recursively cancels the nested tool
 steps. No token needs to link the two — the parent dropping the future is
 enough. The registry entry for the child is removed on return, so it never
 holds a dead handle.
 
-Real token usage from the envoy is accumulated into the parent turn's cost,
+Real token usage from the envoy is accumulated into the parent round's cost,
 so it flows up to the active [pursuit](pursuits.md) if one is set.
 
 ## See also
 
 - [`envoy`](../../reference/tools/envoy.md) — parameter reference.
-- [Turns and rounds](turns-and-rounds.md) — the round trip the envoy runs
+- [Rounds and turns](rounds-and-turns.md) — the turn trip the envoy runs
   internally.
 - [Pursuits](pursuits.md) — how envoy token cost flows up to a parent
   pursuit.
 - [Harness architecture](harness.md) — the safety bounds that bound an envoy
-  turn.
+  round.
 - [ADR-0011](../../adr/0011-subagent-profiles.md) — the capability-axis
   profile primitive.
 - [ADR-0028](../../adr/0028-capability-allocation-scoped-writes.md) — the

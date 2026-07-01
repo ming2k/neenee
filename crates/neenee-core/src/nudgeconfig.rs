@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 /// ```
 ///
 /// Detection is pure signature bookkeeping (no model call) and the nudge is
-/// non-terminating — the hard backstops (`hard_stop_rounds`, `abort`, `Esc`)
+/// non-terminating — the hard backstops (`hard_stop_turns`, `abort`, `Esc`)
 /// still cap. Distinct from the on-demand `/review` diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]

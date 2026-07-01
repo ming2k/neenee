@@ -31,7 +31,7 @@ threshold.
 | `compaction.fallback_window_tokens` | `32000` | Assumed window (tokens) when the model's context window is unknown |
 | `compaction_preserve_turns` | `6` | Number of recent complete user turns kept verbatim after a full compaction |
 | `compaction_summarize` | `true` | Use the active model for an anchored structured summary; `false` uses the deterministic excerpt fallback |
-| `compaction_prune` | `true` | Enable cheap tool-result pruning (pre-turn and mid-turn) |
+| `compaction_prune` | `true` | Enable cheap tool-result pruning (pre-round and mid-round) |
 | `compaction_prune_protect_tokens` | `6000` | Most recent tool results (tokens) protected from pruning |
 
 Resolved thresholds per model (defaults):
@@ -62,13 +62,13 @@ The optional `[principal]` table.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `principal.hard_stop_rounds` | `0` | Hard-stop a turn after this many total tool rounds. `0` = uncapped (the only execution cap; compaction is the backstop) |
+| `principal.hard_stop_turns` | `0` | Hard-stop a turn after this many total tool turns. `0` = uncapped (the only execution cap; compaction is the backstop) |
 | `principal.loop_review_enabled` | `true` | Enables the deterministic read-loop guard's anti-anchoring nudge: when the model repeats the same read (one page or a two-page thrash) without progress, a hidden steering message is injected. Pure signature detection (no model call), non-terminating. Flipped off on envoys and the `/review` diagnostic |
 | `principal.allow_model_stdin` | `false` | Whether the model may supply `stdin` bytes for a `bash` command it emits. Off by default: the bash schema exposes no `stdin` parameter and a command needing input either gets it from a human (interactive classifier → inline input panel) or fails fast with a non-interactive remedy hint (see ADR-0043). On: the bash schema dynamically adds a `stdin` field the model can fill, threaded through as a prefilled pipe — for unattended/automatic flows where no human is reachable |
 
 ```toml
 [principal]
-hard_stop_rounds = 0
+hard_stop_turns = 0
 allow_model_stdin = false
 ```
 
@@ -125,7 +125,7 @@ default_channel = 0
 Extended thinking is **opt-in** (ADR-0046). A model does not reason unless you
 have configured it to. The two reasoning knobs — `effort` (the reasoning-depth
 throttle) and `thinking` (the on/off switch) — are **per model**, not per
-provider: an Opus turn can run at `max` effort while a Haiku turn runs `low`.
+provider: an Opus round can run at `max` effort while a Haiku round runs `low`.
 They live in the `[model_reasoning."<model-id>"]` table, keyed by model id.
 
 **Opt-in rule:** a model's *presence* in this table opts it in to thinking.
@@ -231,7 +231,7 @@ which event honours which.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `hooks[].event` | — | The lifecycle event: `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `PreCompact`, `PostCompact`, `Round` (ADR-0030). `Round` is `Deny`-forbidden — it may inject or observe but cannot abort the turn |
+| `hooks[].event` | — | The lifecycle event: `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop`, `PreCompact`, `PostCompact`, `Turn` (ADR-0030). `Turn` is `Deny`-forbidden — it may inject or observe but cannot abort the round |
 | `hooks[].matcher` | `*` | Tool-name filter. A `|`-separated list of exact names (`Write|Edit`) when only letters/digits/`_`/`|`; otherwise a regular expression. Only the tool events honour it |
 | `hooks[].command` | — | Shell command run when the event matches. Receives the event JSON on stdin; replies via exit code / stdout JSON |
 
@@ -254,7 +254,7 @@ command = ".neenee/hooks/ci-gate.sh"
 # inject context or observe. Carries the read-only-round streak.
 [[hooks]]
 event   = "Round"
-command = ".neenee/hooks/round-watch.sh"
+command = ".neenee/hooks/turn-watch.sh"
 ```
 
 ## Feature tables

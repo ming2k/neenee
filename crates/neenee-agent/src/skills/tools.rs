@@ -84,38 +84,6 @@ impl Tool for ListSkillsTool {
     }
 }
 
-/// Rescan and reload skills from disk and remote repositories.
-pub struct ReloadSkillsTool {
-    pub registry: Arc<SkillRegistry>,
-}
-
-#[async_trait]
-impl Tool for ReloadSkillsTool {
-    fn name(&self) -> &str {
-        "reload_skills"
-    }
-
-    fn description(&self) -> &str {
-        "Rescan local skill directories and refetch remote skill repositories. \
-         Use after adding, removing, or editing skill files."
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        })
-    }
-
-    async fn call(&self, _arguments: &str) -> Result<String, String> {
-        self.registry.reload().await;
-        let registry = self.registry.lock();
-        let count = registry.list().len();
-        Ok(format!("Skills reloaded. {} skill(s) available.", count))
-    }
-}
-
 fn list_skill_files(root: &std::path::Path) -> String {
     let mut files: Vec<String> = Vec::new();
     for entry in walkdir::WalkDir::new(root)
@@ -157,10 +125,6 @@ neenee_core::register_tool!(UseSkillFactory => |ctx| {
 neenee_core::register_tool!(ListSkillsFactory => |ctx| {
     let registry = ctx.shared::<SkillRegistry>()?;
     ListSkillsTool { registry }
-});
-neenee_core::register_tool!(ReloadSkillsFactory => |ctx| {
-    let registry = ctx.shared::<SkillRegistry>()?;
-    ReloadSkillsTool { registry }
 });
 
 #[cfg(test)]

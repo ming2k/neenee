@@ -21,7 +21,7 @@ pub mod cron;
 pub use cron::CronExpr;
 pub mod pursuits;
 pub mod repeat;
-pub use pursuits::{Pursuit, ThreadPursuit, TokenUsage, TurnOutcome, TurnTimer};
+pub use pursuits::{Pursuit, ThreadPursuit, TokenUsage, RoundOutcome, RoundTimer};
 pub use repeat::{DEFAULT_MAX_AGE_DAYS, RepeatJob};
 
 pub const PURSUIT_COMPLETE_MARKER: &str = "[NEENEE_PURSUIT_COMPLETE]";
@@ -79,8 +79,8 @@ pub use events::{
     InputReply, InputRequest, McpServerInfo, ModelInfo, NoticeKind, NoticeSeverity, NoticeSource,
     NoticeSurface, ParentStatus, PermissionDecision, PermissionRequest, PermissionRuleInfo,
     ProviderModelInfo, ProviderPickerRow, ProviderPickerSnapshot, SessionContextSnapshot,
-    SessionOverview, SkillInfo, ToolInfo, TurnEvent, UserQuestion, UserQuestionOption,
-    UserQuestionReply, UserQuestionRequest,
+    SessionOverview, SkillInfo, ToolInfo, RoundEvent, UserQuestion, UserQuestionOption,
+    UserQuestionReply, UserQuestionRequest, DebugSnapshot, DebugToolInfo, DebugMessageInfo,
 };
 pub use hooks::{Hook, HookContext, HookEvent, HookEventKind, HookOutcome, SessionSource};
 pub use mcp::{McpConnectionStatus, McpServerConfig};
@@ -88,7 +88,8 @@ pub use model::{KNOWN_MODELS, Model, WireFormat, model_by_id, resolve as resolve
 pub use nudgeconfig::NudgeConfig;
 pub use pressure::{
     CHARS_PER_TOKEN, CLEARED_TOOL_PREFIX, CompactionPolicy, ContextBudget, PRUNED_TOOL_PLACEHOLDER,
-    PruneOutcome, count_tokens, estimate_bytes, estimate_tokens, prune_tool_results,
+    PruneOutcome, count_tokens, estimate_bytes, estimate_message_tokens, estimate_tokens,
+    prune_tool_results,
 };
 pub use prompt::{PromptChannel, PromptContext, PromptRegistry, PromptSection};
 pub use session_review::{DEFAULT_REVIEWER_HARD_STOP, ReviewStatus, ReviewVerdict, SessionReview};

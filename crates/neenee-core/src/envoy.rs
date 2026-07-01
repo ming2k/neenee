@@ -495,12 +495,11 @@ mod tests {
         t
     }
 
-    /// A control-flow tool shape (the `abort` tool's shape). Used to prove
-    /// profiles exclude control tools by the control-flow flag, regardless of
-    /// name.
+    /// A control-flow tool shape. Used to prove profiles exclude control
+    /// tools by the control-flow flag, regardless of name.
     fn make_control() -> Stub {
         Stub {
-            name: "abort",
+            name: "control-stub",
             requires_user: false,
             spawns_envoy: false,
             affects_control_flow: true,

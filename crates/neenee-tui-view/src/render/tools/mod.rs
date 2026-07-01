@@ -193,7 +193,6 @@ pub fn presenter_for(name: &str) -> &'static dyn ToolPresenter {
         "todo" => &meta::TodoPresenter,
         "envoy" => &meta::EnvoyPresenter,
         "use_skill" => &meta::UseSkillPresenter,
-        "create_project" => &meta::CreateProjectPresenter,
         _ => &fallback::FallbackPresenter,
     }
 }

@@ -60,7 +60,7 @@ pub enum InjectionKind {
     /// A user-configured hook returned `HookOutcome::Inject`. Carries the
     /// lifecycle event so "which hook axis injected this" is recoverable.
     /// Sites: `HookRegistry::{session_start, run_post_tool_use,
-    /// run_post_tool_use_failure, check_stop, run_round}`.
+    /// run_post_tool_use_failure, check_stop, run_turn}`.
     Hook(HookEventKind),
     /// Pursuit stop-gate re-applied the continuation prompt to keep the model
     /// on-task mid-turn. Site: `PursuitState::inject_continuation` and the
@@ -88,7 +88,7 @@ pub enum InjectionKind {
     /// when the model repeats the same read (a single page or a two-page thrash)
     /// without progress. Detection is pure signature bookkeeping — no model call
     /// — and the nudge is non-terminating: it steers off the loop, the hard
-    /// backstops (`hard_stop_rounds`, `abort`, `Esc`) still cap. This is a
+    /// backstops (`hard_stop_turns`, `abort`, `Esc`) still cap. This is a
     /// harness-internal steering injection, distinct from the user-configurable
     /// `Hook(Round)` axis. Site: `Agent::maybe_inject_loop_nudge`
     /// (`crate::loop_guard`).
@@ -97,7 +97,7 @@ pub enum InjectionKind {
     /// under the stable checkpoint header. Site: `checkpoint_message`.
     CompactionCheckpoint,
     /// A harness-internal prompt admitted as a hidden user turn (resume/replay,
-    /// envoy tasking, `/review` re-runs). Site: `orchestrate_turn`
+    /// envoy tasking, `/review` re-runs). Site: `execute_round`
     /// `input.hidden` branch.
     HiddenTurnInput,
 }
@@ -524,7 +524,7 @@ mod tests {
             InjectionKind::Hook(HookEventKind::SessionStart),
             InjectionKind::Hook(HookEventKind::PostToolUse),
             InjectionKind::Hook(HookEventKind::Stop),
-            InjectionKind::Hook(HookEventKind::Round),
+            InjectionKind::Hook(HookEventKind::Turn),
             InjectionKind::PursuitContinuation,
             InjectionKind::PursuitObjectiveUpdated,
             InjectionKind::InterAgent,

@@ -142,7 +142,7 @@ about higher ones:
 - **`overlays/common`** — modal frame/header/scroll helpers reused by every
   modal in `overlays/`.
 - **`render/layout/`** — transcript arrangement strategies (`compact`,
-  `round_band`) selected by `[tui] transcript_layout`.
+  `turn_band`) selected by `[tui] transcript_layout`.
 
 The leaves (`tools/*`, the per-modal overlays) are intentionally thin: they
 compose the mid-tier and base helpers rather than re-implementing wrapping,

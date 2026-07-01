@@ -10,12 +10,12 @@
 //! - **System-prompt assembly** (`prompt.rs`) — methods extending `Agent` that
 //!   rebuild the system message each turn and auto-load mentioned skills.
 //! - **Skill registry + discovery** (`skills/`) — loads skills from disk and
-//!   remote indices; produces the `UseSkillTool` / `ListSkillsTool` /
-//!   `ReloadSkillsTool` tool implementations.
+//!   remote indices; produces the `UseSkillTool` / `ListSkillsTool` tool
+//!   implementations.
 //! - **Turn orchestration** (`orchestration.rs`) — the policy that wraps every
 //!   agent turn: compaction, mid-turn pruning, retries with backoff, the
 //!   `/pursue` stop-gate driver, and the `/repeat` cron scheduler. Frontends drive the harness
-//!   through [`orchestration::execute_turn`] and friends; they own only the
+//!   through [`orchestration::execute_round`] and friends; they own only the
 //!   UI-specific input path (slash commands for the CLI, menus/dialogs for a
 //!   future GUI).
 //!
@@ -74,7 +74,7 @@ pub use neenee_core::{
     PromptSection, Provider, ProviderEntry, ProviderPickerRow, ProviderPickerSnapshot,
     ProviderStreamEvent, PruneOutcome, Pursuit, RetryableError, Role, SessionOverview,
     ShellTermination, SkillsConfig, StdinPolicy, TITLE, ThreadPursuit, TokenUsage, Tool, ToolCall,
-    ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, TurnOutcome, TurnTimer,
+    ToolOutput, ToolPolicy, ToolResult, ToolStream, Transport, RoundOutcome, RoundTimer,
     UserQuestion, UserQuestionOption, UserQuestionReply, UserQuestionRequest, WebSearchConfig,
     estimate_bytes, estimate_tokens, is_context_overflow, is_interactive_command,
     parse_retryable_error, prune_tool_results, public_error_message, retryable_error,

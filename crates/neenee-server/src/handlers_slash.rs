@@ -22,15 +22,16 @@
 use neenee_agent::Agent;
 use neenee_agent::AgentIdentity;
 use neenee_agent::orchestration::{
-    ContextProjectionSettings, PursuitContext, TurnInput, compact_turn_history,
+    ContextProjectionSettings, PursuitContext, RoundInput, compact_round_history,
     emit_pursuit_updated, refresh_agent_pursuit, send_compaction, send_harness_state,
     start_pursuit, turn,
 };
 use neenee_agent::skills::SkillRegistry;
-use neenee_agent::skills::tools::{ListSkillsTool, ReloadSkillsTool, UseSkillTool};
+use neenee_agent::skills::tools::{ListSkillsTool, UseSkillTool};
 use neenee_core::{
-    AgentNotice, AgentRequest, AgentResponse, CronExpr, Message, NoticeKind, NoticeSeverity,
-    NoticeSource, NoticeSurface, Provider, Pursuit, Tool, TurnEvent,
+    AgentNotice, AgentRequest, AgentResponse, CronExpr, DebugMessageInfo, DebugSnapshot,
+    DebugToolInfo, Message, NoticeKind, NoticeSeverity, NoticeSource, NoticeSurface, Provider,
+    Pursuit, Tool, RoundEvent, estimate_bytes, estimate_message_tokens, estimate_tokens,
 };
 use neenee_store::{RepeatStore, config::Config, embedding, session::SessionStore};
 use neenee_tools::commands::{CustomCommand, expand_command};
@@ -108,7 +109,7 @@ pub async fn dispatch(
                 agent.clear_allowed_tools();
                 let _ = resp_tx.send(turn(
                     &session.id().await,
-                    TurnEvent::Text("Always-allowed tool rules cleared.".to_string()),
+                    RoundEvent::Text("Always-allowed tool rules cleared.".to_string()),
                 ));
             } else {
                 let allowed = agent.allowed_tools();
@@ -117,7 +118,7 @@ pub async fn dispatch(
                 } else {
                     format!("Always-allowed tools:\n- {}", allowed.join("\n- "))
                 };
-                let _ = resp_tx.send(turn(&session.id().await, TurnEvent::Text(message)));
+                let _ = resp_tx.send(turn(&session.id().await, RoundEvent::Text(message)));
             }
         }
         Some(BuiltinCmd::Unattended) => {
@@ -137,7 +138,7 @@ pub async fn dispatch(
             agent.set_unattended(enabled);
             let _ = resp_tx.send(turn(
                 &session.id().await,
-                TurnEvent::Text(format!(
+                RoundEvent::Text(format!(
                     "Unattended {}: write tools {} run without permission prompts.",
                     if enabled { "ON" } else { "OFF" },
                     if enabled { "will" } else { "won't" },
@@ -145,7 +146,7 @@ pub async fn dispatch(
             ));
             let _ = resp_tx.send(turn(
                 &session.id().await,
-                TurnEvent::UnattendedChanged(enabled),
+                RoundEvent::UnattendedChanged(enabled),
             ));
             // No `send_harness_state` here: toggling unattended is not a
             // turn lifecycle transition, so emitting a `HarnessState("idle")`
@@ -175,7 +176,7 @@ pub async fn dispatch(
             if rounds == 0 {
                 let _ = resp_tx.send(turn(
                     &session.id().await,
-                    TurnEvent::Text(
+                    RoundEvent::Text(
                         "Nothing to review yet — no tool rounds in the current \
                                          transcript."
                             .to_string(),
@@ -185,7 +186,7 @@ pub async fn dispatch(
             }
             let _ = resp_tx.send(turn(
                 &session.id().await,
-                TurnEvent::Activity("running session review…".to_string()),
+                RoundEvent::Activity("running session review…".to_string()),
             ));
             let verdicts = agent.review_now(&transcript).await;
             // Mirror the worst verdict into the activity-bar
@@ -194,7 +195,7 @@ pub async fn dispatch(
             if !alert.trim().is_empty() {
                 let _ = resp_tx.send(turn(
                     &session.id().await,
-                    TurnEvent::Notice(
+                    RoundEvent::Notice(
                         AgentNotice::new(
                             NoticeKind::ReviewAlert,
                             NoticeSeverity::Warning,
@@ -208,11 +209,11 @@ pub async fn dispatch(
             }
             let _ = resp_tx.send(turn(
                 &session.id().await,
-                TurnEvent::SessionReview { alert },
+                RoundEvent::SessionReview { alert },
             ));
             let _ = resp_tx.send(turn(
                 &session.id().await,
-                TurnEvent::Text(format_review_report(&verdicts, rounds)),
+                RoundEvent::Text(format_review_report(&verdicts, rounds)),
             ));
         }
         Some(BuiltinCmd::Search) => {
@@ -220,7 +221,7 @@ pub async fn dispatch(
             if query.is_empty() {
                 let _ = resp_tx.send(turn(
                     &session.id().await,
-                    TurnEvent::Text("Usage: /search <query>".to_string()),
+                    RoundEvent::Text("Usage: /search <query>".to_string()),
                 ));
             } else {
                 let messages = session.full_transcript().await;
@@ -242,7 +243,7 @@ pub async fn dispatch(
                         if results.is_empty() {
                             let _ = resp_tx.send(turn(
                                 &session.id().await,
-                                TurnEvent::Text("No relevant history found.".to_string()),
+                                RoundEvent::Text("No relevant history found.".to_string()),
                             ));
                         } else {
                             let mut lines =
@@ -252,7 +253,7 @@ pub async fn dispatch(
                             }
                             let _ = resp_tx.send(turn(
                                 &session.id().await,
-                                TurnEvent::Text(lines.join("\n\n")),
+                                RoundEvent::Text(lines.join("\n\n")),
                             ));
                         }
                     }
@@ -274,7 +275,7 @@ pub async fn dispatch(
                     let _ = resp_tx.send(AgentResponse::ConversationReplaced(transcript));
                     let _ = resp_tx.send(turn(
                         &session.id().await,
-                        TurnEvent::Text(format!("Resumed session {}.", short_session_id(&id))),
+                        RoundEvent::Text(format!("Resumed session {}.", short_session_id(&id))),
                     ));
                     send_harness_state(resp_tx, &session.id().await, agent, "idle");
                 }
@@ -304,7 +305,7 @@ pub async fn dispatch(
                     .unwrap_or_else(|| "none".to_string());
                 let _ = resp_tx.send(turn(
                                         &session.id().await,
-                                        TurnEvent::Text(format!(
+                                        RoundEvent::Text(format!(
                                     "Session: {}\nForked from: {}\nModel-window messages: {}\nArchived transcript messages: {}\nLoop checkpoint: {}\nLast context projection: {}",
                                     id,
                                     parent_id,
@@ -338,7 +339,7 @@ pub async fn dispatch(
                         .collect::<Vec<_>>();
                     let _ = resp_tx.send(turn(
                         &session.id().await,
-                        TurnEvent::Text(format!("Sessions:\n{}", lines.join("\n"))),
+                        RoundEvent::Text(format!("Sessions:\n{}", lines.join("\n"))),
                     ));
                 }
                 Err(error) => {
@@ -356,7 +357,7 @@ pub async fn dispatch(
                     Ok((id, parent_id)) => {
                         let _ = resp_tx.send(turn(
                             &session.id().await,
-                            TurnEvent::Text(format!("Forked session {} from {}.", id, parent_id)),
+                            RoundEvent::Text(format!("Forked session {} from {}.", id, parent_id)),
                         ));
                         send_harness_state(resp_tx, &session.id().await, agent, "idle");
                     }
@@ -385,7 +386,7 @@ pub async fn dispatch(
                         let _ = resp_tx.send(AgentResponse::ConversationReplaced(transcript));
                         let _ = resp_tx.send(turn(
                             &session.id().await,
-                            TurnEvent::Text(format!("Opened session {}.", id)),
+                            RoundEvent::Text(format!("Opened session {}.", id)),
                         ));
                         send_harness_state(resp_tx, &session.id().await, agent, "idle");
                     }
@@ -406,7 +407,7 @@ pub async fn dispatch(
                         let _ = resp_tx.send(AgentResponse::ConversationReplaced(transcript));
                         let _ = resp_tx.send(turn(
                             &session.id().await,
-                            TurnEvent::Text(format!("Resumed session {}.", short_session_id(&id))),
+                            RoundEvent::Text(format!("Resumed session {}.", short_session_id(&id))),
                         ));
                         send_harness_state(resp_tx, &session.id().await, agent, "idle");
                     }
@@ -428,12 +429,12 @@ pub async fn dispatch(
                     Ok(id) => {
                         let _ = resp_tx.send(turn(
                             &session.id().await,
-                            TurnEvent::TodosUpdated(neenee_core::TodoList::default()),
+                            RoundEvent::TodosUpdated(neenee_core::TodoList::default()),
                         ));
                         let _ = resp_tx.send(AgentResponse::ConversationCleared);
                         let _ = resp_tx.send(turn(
                             &session.id().await,
-                            TurnEvent::Text(format!("Started new session: {}", id)),
+                            RoundEvent::Text(format!("Started new session: {}", id)),
                         ));
                     }
                     Err(error) => {
@@ -514,7 +515,7 @@ pub async fn dispatch(
                     generation_clone,
                     resp_tx,
                     config,
-                    TurnInput {
+                    RoundInput {
                         prompt: prompt.to_string(),
                         hidden: false,
                         display_prompt: None,
@@ -530,10 +531,10 @@ pub async fn dispatch(
                 ContextProjectionSettings::from_config(config, active_context_window(agent));
             let _ = resp_tx.send(turn(
                 &session.id().await,
-                TurnEvent::Activity("compacting context".to_string()),
+                RoundEvent::Activity("compacting context".to_string()),
             ));
             let extra = agent.fire_pre_compact().await;
-            match compact_turn_history(
+            match compact_round_history(
                 &mut current,
                 session,
                 &settings,
@@ -549,7 +550,7 @@ pub async fn dispatch(
                 Ok(None) => {
                     let _ = resp_tx.send(turn(
                         &session.id().await,
-                        TurnEvent::Text("Not enough complete turns to compact.".to_string()),
+                        RoundEvent::Text("Not enough complete turns to compact.".to_string()),
                     ));
                 }
                 Err(error) => {
@@ -575,7 +576,7 @@ pub async fn dispatch(
                     Ok(Some(pursuit)) => {
                         agent.set_pursuit(pursuit.clone());
                         emit_pursuit_updated(tx, session_id, &pursuit);
-                        let _ = tx.send(turn(session_id, TurnEvent::Text(success(&pursuit))));
+                        let _ = tx.send(turn(session_id, RoundEvent::Text(success(&pursuit))));
                     }
                     Ok(None) => {
                         let _ = tx.send(AgentResponse::Error(empty.into()));
@@ -592,12 +593,12 @@ pub async fn dispatch(
                     token.cancel();
                     let _ = resp_tx.send(turn(
                         &thread_id,
-                        TurnEvent::Text("Pursuit stop requested.".to_string()),
+                        RoundEvent::Text("Pursuit stop requested.".to_string()),
                     ));
                 } else {
                     let _ = resp_tx.send(turn(
                         &thread_id,
-                        TurnEvent::Text("No pursuit is running.".to_string()),
+                        RoundEvent::Text("No pursuit is running.".to_string()),
                     ));
                 }
                 // Genuine lifecycle transition (mirrors `interrupt`): flip the
@@ -633,7 +634,7 @@ pub async fn dispatch(
                     }
                     None => "No active pursuit. Start one with /pursue <condition>.".to_string(),
                 };
-                let _ = resp_tx.send(turn(&thread_id, TurnEvent::Text(message)));
+                let _ = resp_tx.send(turn(&thread_id, RoundEvent::Text(message)));
             } else if rest == "clear" {
                 agent.disarm_pursuit();
                 match session.set_pursuit(None).await {
@@ -645,15 +646,15 @@ pub async fn dispatch(
                             // `⟴` badge updates without flushing the live
                             // activity cell (which a `HarnessState("idle")`
                             // would do, flickering the bar mid-turn).
-                            let _ = resp_tx.send(turn(&thread_id, TurnEvent::PursuitCleared));
+                            let _ = resp_tx.send(turn(&thread_id, RoundEvent::PursuitCleared));
                             let _ = resp_tx.send(turn(
                                 &thread_id,
-                                TurnEvent::Text("Pursuit cleared.".to_string()),
+                                RoundEvent::Text("Pursuit cleared.".to_string()),
                             ));
                         } else {
                             let _ = resp_tx.send(turn(
                                 &thread_id,
-                                TurnEvent::Text("No pursuit to clear.".to_string()),
+                                RoundEvent::Text("No pursuit to clear.".to_string()),
                             ));
                         }
                     }
@@ -692,7 +693,7 @@ pub async fn dispatch(
                             emit_pursuit_updated(resp_tx, &thread_id, &pursuit);
                             let _ = resp_tx.send(turn(
                                 &thread_id,
-                                TurnEvent::Text(format!("Pursuit updated: {}", pursuit.objective)),
+                                RoundEvent::Text(format!("Pursuit updated: {}", pursuit.objective)),
                             ));
                         }
                         Ok(None) => {
@@ -721,7 +722,7 @@ pub async fn dispatch(
                         Some(pursuit) if !pursuit.is_complete => {
                             let _ = resp_tx.send(turn(
                                 &thread_id,
-                                TurnEvent::Text(format!(
+                                RoundEvent::Text(format!(
                                     "Resuming pursuit on existing pursuit: {}",
                                     pursuit.objective
                                 )),
@@ -784,7 +785,7 @@ pub async fn dispatch(
             if rest.is_empty() || rest == "help" {
                 let _ = resp_tx.send(turn(
                                     &session.id().await,
-                                    TurnEvent::Text(
+                                    RoundEvent::Text(
                                         "Usage: /repeat <cron> <prompt>\n\
                                          cron is five fields: minute hour day month weekday \
                                          (e.g. `*/5 * * * *` = every 5 min, `0 9 * * 1-5` = 09:00 weekdays).\n\
@@ -799,7 +800,7 @@ pub async fn dispatch(
                 if jobs.is_empty() {
                     let _ = resp_tx.send(turn(
                         &session.id().await,
-                        TurnEvent::Text("No /repeat jobs scheduled.".to_string()),
+                        RoundEvent::Text("No /repeat jobs scheduled.".to_string()),
                     ));
                 } else {
                     let mut lines = vec!["Scheduled /repeat jobs:".to_string()];
@@ -813,7 +814,7 @@ pub async fn dispatch(
                         ));
                     }
                     let _ =
-                        resp_tx.send(turn(&session.id().await, TurnEvent::Text(lines.join("\n"))));
+                        resp_tx.send(turn(&session.id().await, RoundEvent::Text(lines.join("\n"))));
                 }
                 return;
             }
@@ -823,13 +824,13 @@ pub async fn dispatch(
                     Ok(true) => {
                         let _ = resp_tx.send(turn(
                             &session.id().await,
-                            TurnEvent::Text(format!("Cancelled repeat job {id}.")),
+                            RoundEvent::Text(format!("Cancelled repeat job {id}.")),
                         ));
                     }
                     Ok(false) => {
                         let _ = resp_tx.send(turn(
                             &session.id().await,
-                            TurnEvent::Text(format!("No repeat job with id {id}.")),
+                            RoundEvent::Text(format!("No repeat job with id {id}.")),
                         ));
                     }
                     Err(error) => {
@@ -871,7 +872,7 @@ pub async fn dispatch(
                 Ok(job) => {
                     let _ = resp_tx.send(turn(
                         &session.id().await,
-                        TurnEvent::Text(format!(
+                        RoundEvent::Text(format!(
                             "Scheduled repeat job {} (`{}`), next {}. Running now.",
                             &job.id[..8.min(job.id.len())],
                             cron,
@@ -895,7 +896,7 @@ pub async fn dispatch(
                 Ok(created) if created.is_empty() => {
                     let _ = resp_tx.send(turn(
                         &session.id().await,
-                        TurnEvent::Text(format!(
+                        RoundEvent::Text(format!(
                             "neenee is already configured in '{}'. Nothing to do.",
                             target
                         )),
@@ -904,7 +905,7 @@ pub async fn dispatch(
                 Ok(created) => {
                     let _ = resp_tx.send(turn(
                         &session.id().await,
-                        TurnEvent::Text(format!(
+                        RoundEvent::Text(format!(
                             "Initialized neenee configuration in '{}'.\nCreated:\n{}",
                             target,
                             created
@@ -930,7 +931,7 @@ pub async fn dispatch(
                     match tool.call("{}").await {
                         Ok(output) => {
                             let _ =
-                                resp_tx.send(turn(&session.id().await, TurnEvent::Text(output)));
+                                resp_tx.send(turn(&session.id().await, RoundEvent::Text(output)));
                         }
                         Err(error) => {
                             let _ = resp_tx.send(AgentResponse::Error(error));
@@ -938,18 +939,12 @@ pub async fn dispatch(
                     }
                 }
                 "reload" => {
-                    let tool = ReloadSkillsTool {
-                        registry: skills_registry_for_commands.clone(),
-                    };
-                    match tool.call("{}").await {
-                        Ok(output) => {
-                            let _ =
-                                resp_tx.send(turn(&session.id().await, TurnEvent::Text(output)));
-                        }
-                        Err(error) => {
-                            let _ = resp_tx.send(AgentResponse::Error(error));
-                        }
-                    }
+                    skills_registry_for_commands.reload().await;
+                    let count = skills_registry_for_commands.lock().list().len();
+                    let _ = resp_tx.send(turn(
+                        &session.id().await,
+                        RoundEvent::Text(format!("Skills reloaded. {} skill(s) available.", count)),
+                    ));
                 }
                 other => {
                     let _ = resp_tx.send(AgentResponse::Error(format!(
@@ -970,7 +965,7 @@ pub async fn dispatch(
                 };
                 match tool.call(&args).await {
                     Ok(output) => {
-                        let _ = resp_tx.send(turn(&session.id().await, TurnEvent::Text(output)));
+                        let _ = resp_tx.send(turn(&session.id().await, RoundEvent::Text(output)));
                     }
                     Err(error) => {
                         let _ = resp_tx.send(AgentResponse::Error(error));
@@ -986,11 +981,11 @@ pub async fn dispatch(
             let _ = resp_tx.send(AgentResponse::ConversationCleared);
             let _ = resp_tx.send(turn(
                 &session.id().await,
-                TurnEvent::TodosUpdated(neenee_core::TodoList::default()),
+                RoundEvent::TodosUpdated(neenee_core::TodoList::default()),
             ));
             let _ = resp_tx.send(turn(
                 &session.id().await,
-                TurnEvent::Text("Conversation history cleared.".to_string()),
+                RoundEvent::Text("Conversation history cleared.".to_string()),
             ));
         }
         Some(BuiltinCmd::Export) => {
@@ -1013,7 +1008,7 @@ pub async fn dispatch(
                 Ok(crate::CopyOutcome::Native) => {
                     let _ = resp_tx.send(turn(
                         &session.id().await,
-                        TurnEvent::Text(format!(
+                        RoundEvent::Text(format!(
                             "Session exported to clipboard ({} messages, {} chars). \
                                              Paste it into another agent to continue this work.",
                             messages.len(),
@@ -1024,7 +1019,7 @@ pub async fn dispatch(
                 Ok(crate::CopyOutcome::Osc52) => {
                     let _ = resp_tx.send(turn(
                         &session.id().await,
-                        TurnEvent::Text(format!(
+                        RoundEvent::Text(format!(
                             "Session exported via OSC52 ({} messages, {} chars). \
                                              If your terminal did not capture it, run neenee in a \
                                              clipboard-capable environment.",
@@ -1066,7 +1061,7 @@ pub async fn dispatch(
                     agent.provider.set_debug_capture(enabled, dir.clone());
                     let _ = resp_tx.send(turn(
                         &session.id().await,
-                        TurnEvent::Text(format!(
+                        RoundEvent::Text(format!(
                             "Network capture {}: each provider round-trip {} written to\n  {}",
                             if enabled { "ON" } else { "OFF" },
                             if enabled { "is" } else { "will no longer be" },
@@ -1074,18 +1069,146 @@ pub async fn dispatch(
                         )),
                     ));
                 }
+                Some("context") => {
+                    // /debug context — dev-only dry run. Snapshots the exact
+                    // request the next turn would send: the model-visible
+                    // message list (rebuilt head system message + auto-loaded
+                    // skills, mirroring `prepare_turn_messages`), the
+                    // model-visible tool schemas, provider/model identity,
+                    // context window, estimated token pressure, and the active
+                    // pursuit. NO provider call is made; nothing is mutated.
+                    // The full JSON record is persisted to the per-project
+                    // `debug/` dir, and a typed snapshot is shipped to the TUI
+                    // as `AgentResponse::DebugSnapshot` so it renders in a
+                    // dedicated inspector modal — not a flat transcript line.
+                    let messages = {
+                        let mut snapshot = history.lock().await.clone();
+                        agent.prepare_turn_messages_debug(&mut snapshot);
+                        snapshot
+                    };
+                    let provider_id = agent.provider.provider_id();
+                    let model_name = agent.provider.model();
+                    let window = active_context_window(agent);
+                    let tokens = estimate_tokens(&messages);
+                    let tools: Vec<DebugToolInfo> = agent
+                        .installed_tools()
+                        .iter()
+                        .map(|tool| DebugToolInfo {
+                            name: tool.name().to_string(),
+                            description: tool.description().to_string(),
+                            variant: tool.variant().to_string(),
+                        })
+                        .collect();
+                    let pursuit = agent.get_pursuit();
+                    let session_id = session.id().await;
+                    let timestamp = chrono::Utc::now();
+                    let pressure_pct = if window > 0 {
+                        (tokens as f64 / window as f64 * 100.0).round() as u64
+                    } else {
+                        0
+                    };
+
+                    // Per-message flattened rows for the inspector's Messages
+                    // section: index, role, hidden flag, per-message token
+                    // estimate, and a one-line summary.
+                    let message_infos: Vec<DebugMessageInfo> = messages
+                        .iter()
+                        .enumerate()
+                        .map(|(index, m)| DebugMessageInfo {
+                            index,
+                            role: format!("{:?}", m.role).to_lowercase(),
+                            hidden: m.hidden || m.origin.is_some(),
+                            tokens: estimate_message_tokens(m).max(0) as usize,
+                            summary: one_line_summary(&m.content),
+                        })
+                        .collect();
+
+                    let snapshot = DebugSnapshot {
+                        timestamp: timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                        file_path: String::new(), // filled after the file write below
+                        session_id: session_id.clone(),
+                        provider: provider_id.clone(),
+                        model: model_name.clone(),
+                        context_window_tokens: window,
+                        estimated_tokens: tokens,
+                        estimated_bytes: estimate_bytes(&messages),
+                        pressure_pct,
+                        pursuit: pursuit.clone(),
+                        tools: tools.clone(),
+                        messages: message_infos,
+                    };
+
+                    // Persist the full record (with the raw messages + tool
+                    // schemas) for offline inspection.
+                    let dir = neenee_store::paths::get().project_debug_dir(project_root_for_side);
+                    let stamp = timestamp.format("%Y%m%d-%H%M%S%.3f");
+                    let file = dir.join(format!("{stamp}_context.json"));
+                    let record = serde_json::json!({
+                        "timestamp": snapshot.timestamp,
+                        "session_id": snapshot.session_id,
+                        "provider": snapshot.provider,
+                        "model": snapshot.model,
+                        "context_window_tokens": window,
+                        "estimated_tokens": tokens,
+                        "estimated_bytes": snapshot.estimated_bytes,
+                        "pressure_pct": pressure_pct,
+                        "pursuit": pursuit,
+                        "tools": agent
+                            .installed_tools()
+                            .iter()
+                            .map(|tool| tool.to_openai_function())
+                            .collect::<Vec<_>>(),
+                        "messages": messages,
+                    });
+                    let file_path = file.display().to_string();
+                    match serde_json::to_vec_pretty(&record) {
+                        Ok(bytes) => {
+                            if let Err(error) =
+                                neenee_store::fsutil::atomic_write_bytes(&file, &bytes)
+                            {
+                                let _ = resp_tx.send(AgentResponse::Error(format!(
+                                    "Context snapshot write failed: {error}"
+                                )));
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = resp_tx.send(AgentResponse::Error(format!(
+                                "Context snapshot serialize failed: {error}"
+                            )));
+                            return;
+                        }
+                    }
+
+                    // Ship the typed snapshot (with the resolved path) to the
+                    // TUI so it opens the inspector modal.
+                    let snapshot = DebugSnapshot { file_path: file_path.clone(), ..snapshot };
+                    let _ = resp_tx.send(AgentResponse::DebugSnapshot(snapshot));
+                    let _ = resp_tx.send(turn(
+                        &session_id,
+                        RoundEvent::Text(format!(
+                            "Context snapshot (dry run) — inspector opened. \
+                             ~{tokens} tokens, {n_msgs} message(s), {n_tools} tool(s). \
+                             Full JSON: {file_path}",
+                            n_msgs = messages.len(),
+                            n_tools = tools.len(),
+                        )),
+                    ));
+                }
                 Some(other) => {
                     let _ = resp_tx.send(AgentResponse::Error(format!(
-                        "Unknown debug target '{other}'. Available: network. \
-                         Usage: `/debug network on|off`."
+                        "Unknown debug target '{other}'. Available: network, context. \
+                         Usage: `/debug network on|off` or `/debug context`."
                     )));
                 }
                 None => {
                     let network_on = agent.provider.debug_capture_enabled();
                     let _ = resp_tx.send(turn(
                         &session.id().await,
-                        TurnEvent::Text(format!(
-                            "Debug status:\n- network: {}\n\nUsage: `/debug network on|off`",
+                        RoundEvent::Text(format!(
+                            "Debug status:\n- network: {}\n\nUsage:\n\
+                             - `/debug network on|off` — capture each provider round-trip\n\
+                             - `/debug context` — dry-run the next request to disk",
                             if network_on { "ON" } else { "OFF" },
                         )),
                     ));
@@ -1120,7 +1243,7 @@ pub async fn dispatch(
             }
             let _ = resp_tx.send(turn(
                 &session.id().await,
-                TurnEvent::Text(format!(
+                RoundEvent::Text(format!(
                     "{}
 {custom_help}",
                     lines.join(
@@ -1152,7 +1275,7 @@ pub async fn dispatch(
                 generation_clone,
                 resp_tx,
                 config,
-                TurnInput {
+                RoundInput {
                     prompt: expand_command(command, arguments),
                     hidden: false,
                     display_prompt: Some(cmd),
@@ -1161,5 +1284,25 @@ pub async fn dispatch(
             )
             .await;
         }
+    }
+}
+
+/// One-line, length-capped summary of a message's content for the debug
+/// inspector's Messages list. Collapses control chars to spaces and truncates
+/// to `max_chars`, appending an ellipsis when truncated. Mirrors the
+/// `common::one_line` flattening the TUI uses for row text.
+fn one_line_summary(content: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let flat: String = content
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.trim();
+    if flat.chars().count() <= MAX_CHARS {
+        flat.to_string()
+    } else {
+        let mut out: String = flat.chars().take(MAX_CHARS).collect();
+        out.push('…');
+        out
     }
 }

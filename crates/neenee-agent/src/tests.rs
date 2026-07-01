@@ -435,7 +435,7 @@ async fn round_persist_fires_at_each_tool_round_boundary() {
         crate::AgentIdentity::default(),
     );
     let seen_for_cb = Arc::clone(&seen_lengths);
-    agent.set_round_persist(Arc::new(move |messages: &[Message]| {
+    agent.set_turn_persist(Arc::new(move |messages: &[Message]| {
         let len = messages.len();
         seen_for_cb.lock().unwrap().push(len);
         // Snapshot the slice for the 'static future (the closure itself does
@@ -1000,7 +1000,7 @@ fn transcript(events: &[AgentEvent]) -> Vec<String> {
                 format!("notice {:?} {:?}", notice.kind, notice.title)
             }
             AgentEvent::ModelRequestStarted { tool_round } => {
-                format!("model-request round={tool_round}")
+                format!("model-request turn={tool_round}")
             }
             AgentEvent::AssistantDelta { delta, start } => {
                 format!("assistant-delta start={start} {delta:?}")
@@ -1056,7 +1056,7 @@ async fn run_golden_turn(
     agent: &Agent,
     prompt: &str,
     decision: PermissionDecision,
-) -> (Vec<AgentEvent>, Result<TurnOutcome, HarnessError>) {
+) -> (Vec<AgentEvent>, Result<RoundOutcome, HarnessError>) {
     let mut messages = vec![Message::new(Role::User, prompt)];
     let mut events = Vec::new();
     let outcome = agent
@@ -1093,12 +1093,12 @@ async fn golden_native_tool_round_then_final_text() {
     assert_eq!(
         transcript(&events),
         vec![
-            "model-request round=0",
+            "model-request turn=0",
             "tool-call alpha {\"k\":1}",
             "tool-call beta {\"k\":2}",
             "tool-result alpha \"A-out\"",
             "tool-result beta \"B-out\"",
-            "model-request round=1",
+            "model-request turn=1",
             "assistant-delta start=true \"all done\"",
             "assistant-end \"all done\"",
         ]
@@ -1125,13 +1125,13 @@ async fn golden_text_fallback_tool_call_is_discarded_then_dispatched() {
     assert_eq!(
         transcript(&events),
         vec![
-            "model-request round=0",
+            "model-request turn=0",
             "assistant-delta start=true \"{\\\"tool\\\":\\\"alpha\\\",\\\"arguments\\\":{\\\"k\\\":1}}\"",
             "assistant-end \"{\\\"tool\\\":\\\"alpha\\\",\\\"arguments\\\":{\\\"k\\\":1}}\"",
             "assistant-discard",
             "tool-call alpha {\"k\":1}",
             "tool-result alpha \"A-out\"",
-            "model-request round=1",
+            "model-request turn=1",
             "assistant-delta start=true \"finished\"",
             "assistant-end \"finished\"",
         ]
@@ -1422,7 +1422,7 @@ async fn golden_reasoning_precedes_text_in_the_same_round() {
     assert_eq!(
         transcript(&events),
         vec![
-            "model-request round=0",
+            "model-request turn=0",
             "reasoning-delta start=true \"think\"",
             "assistant-delta start=true \"answer\"",
             "assistant-end \"answer\"",
@@ -1681,16 +1681,16 @@ fn distinct_read_rounds(n: usize, suffix: Option<&str>) -> Vec<Vec<ProviderStrea
 }
 
 #[test]
-fn hard_stop_rounds_getter_round_trips_setter() {
-    // The `/hard-stop` path (and config seed) writes via `set_hard_stop_rounds`
-    // and reads via `get_hard_stop_rounds`; the pair must round-trip. Default
+fn hard_stop_turns_getter_round_trips_setter() {
+    // The `/hard-stop` path (and config seed) writes via `set_hard_stop_turns`
+    // and reads via `get_hard_stop_turns`; the pair must round-trip. Default
     // is 0 (uncapped, ADR-0009).
     let agent = agent();
-    assert_eq!(agent.get_hard_stop_rounds(), 0);
-    agent.set_hard_stop_rounds(99);
-    assert_eq!(agent.get_hard_stop_rounds(), 99);
-    agent.set_hard_stop_rounds(0);
-    assert_eq!(agent.get_hard_stop_rounds(), 0);
+    assert_eq!(agent.get_hard_stop_turns(), 0);
+    agent.set_hard_stop_turns(99);
+    assert_eq!(agent.get_hard_stop_turns(), 99);
+    agent.set_hard_stop_turns(0);
+    assert_eq!(agent.get_hard_stop_turns(), 0);
 }
 
 #[test]
@@ -1753,7 +1753,7 @@ fn estimate_tool_rounds_counts_assistant_tool_call_messages() {
 
 #[tokio::test]
 async fn hard_stop_aborts_when_budget_configured() {
-    // hard_stop_rounds is the only opt-in execution cap. With it set to 3, the
+    // hard_stop_turns is the only opt-in execution cap. With it set to 3, the
     // 3rd tool round trips the budget and the turn aborts with the budget in
     // the message.
     let tool = RecordingTool::read("alpha", "A-out");
@@ -1763,7 +1763,7 @@ async fn hard_stop_aborts_when_budget_configured() {
         crate::skills::SkillRegistry::empty(),
         crate::AgentIdentity::default(),
     );
-    agent.set_hard_stop_rounds(3);
+    agent.set_hard_stop_turns(3);
 
     let mut messages = vec![Message::new(Role::User, "go")];
     let error = agent
@@ -1828,10 +1828,10 @@ fn agent_config_defaults_match_runtime_constants() {
     // from one that explicitly sets the defaults (ADR-0018).
     use neenee_store::config::PrincipalConfig;
     let cfg = PrincipalConfig::default();
-    assert_eq!(cfg.hard_stop_rounds, 0);
+    assert_eq!(cfg.hard_stop_turns, 0);
     // The agent seeds the same hard-stop budget by default (uncapped).
     let agent = agent();
-    assert_eq!(agent.get_hard_stop_rounds(), 0);
+    assert_eq!(agent.get_hard_stop_turns(), 0);
 }
 
 // ── /debug network capture ────────────────────────────────────────────

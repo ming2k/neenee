@@ -1,6 +1,6 @@
 # Interrupt semantics
 
-A turn is not one indivisible operation — it is a pipeline with three
+A round is not one indivisible operation — it is a pipeline with three
 distinct phases, and an interrupt (`Esc` / `AgentOp::Interrupt`) means
 something different in each. This page is the single reference for *what an
 interrupt actually does* at each phase, *what survives in the conversation
@@ -8,9 +8,9 @@ context*, and *what it costs*. It is the design rationale behind two
 intertwined decisions: neenee always uses streaming, and an interrupt is
 treated as a three-phase, billing-aware event rather than a blunt kill.
 
-For the turn lifecycle that the phases below carve up, see
-[Turns and rounds](agent-design/turns-and-rounds.md). For how token counts
-are normally booked on a *completed* turn, see
+For the round lifecycle that the phases below carve up, see
+[Rounds and turns](agent-design/rounds-and-turns.md). For how token counts
+are normally booked on a *completed* round, see
 [Token accounting](agent-design/token-accounting.md).
 
 ## Why streaming (and why it matters here)
@@ -35,15 +35,15 @@ server's backpressure channel: dropping the stream is a genuine "stop"
 instruction, acknowledged (after a small lag) on the server side.
 
 This is also why neenee's [Token accounting](agent-design/token-accounting.md)
-can under-report on an interrupted turn — the `usage` chunk that carries the
+can under-report on an interrupted round — the `usage` chunk that carries the
 authoritative count is the *last* SSE event, emitted only after generation
 completes, and an interrupt never reaches it. See [Interrupted turns and the
 token ledger](#interrupted-turns-and-the-token-ledger) below.
 
 ## The three phases
 
-A turn flows through three phases in strict order. An interrupt is
-interpreted according to **which phase the turn is in at the instant `Esc`
+A round flows through three phases in strict order. An interrupt is
+interpreted according to **which phase the round is in at the instant `Esc`
 fires**. The table below is the executive summary; each phase is then
 explained in detail.
 
@@ -51,7 +51,7 @@ explained in detail.
 |-------|-------------------|------------------------|----------------|---------|
 | **1. In-flight, pre-response** | Request sent; no bytes back yet | Cancel the request, **unsend** the user message | None — message returns to the input for re-editing; context reverted to pre-send | Input tokens of the *cancelled* request may still bill (request already left); but no assistant message, no output tokens |
 | **2. Local, pre-remote** | Response streaming in; TUI rendering deltas | Drop the stream, discard the partial text | Partial assistant text is **dropped** (never pushed, never persisted); no marker inserted | Input tokens bill; output tokens generated so far bill; generation stops within a few tokens |
-| **3. Remote / tool** | Assistant message committed; tools executing | Cancel tools, emit `ToolCancelled`, do not append results | Committed assistant message **stays**; tool results are **not** appended; round is not persisted | Input + committed output tokens bill; cancelled tools' side effects are best-effort stopped |
+| **3. Remote / tool** | Assistant message committed; tools executing | Cancel tools, emit `ToolCancelled`, do not append results | Committed assistant message **stays**; tool results are **not** appended; turn is not persisted | Input + committed output tokens bill; cancelled tools' side effects are best-effort stopped |
 
 The naming is deliberate. **Local** vs **remote** refers to *where the
 interruptible work has moved to*: in Phase 2 the work is the remote model
@@ -77,26 +77,26 @@ let mut stream = tokio::select! {
 };
 ```
 
-If `Esc` lands in this window the turn aborts *before the stream object
+If `Esc` lands in this window the round aborts *before the stream object
 exists*, so nothing has been rendered and the cancellation is clean. This
 window exists by construction: the `select!` is `biased` so the cancel arm
 wins ties, and `STREAM_IDLE_TIMEOUT` bounds how long the harness will wait
 for the provider to even open the connection.
 
 **Design (implemented unsend):** because no evidence of a response has
-reached the client, this phase is the only one where the turn is *truly
+reached the client, this phase is the only one where the round is *truly
 reversible* at the conversation layer. An interrupt here is treated as an
 **unsend** rather than an abort.
 
-The mechanism (`execute_turn` in `orchestration.rs`): on the error path, if
-the result is `Err(Interrupted)` **and** the turn's `streamed_text` flag is
+The mechanism (`execute_round` in `orchestration.rs`): on the error path, if
+the result is `Err(Interrupted)` **and** the round's `streamed_text` flag is
 still `false` **and** no tool has run (`tool_activity` still `false`), the
 harness pops the user message back out of `turn_history`, reverts the session
-store with `replace_messages`, emits a `TurnEvent::UnsentInput { prompt,
+store with `replace_messages`, emits a `RoundEvent::UnsentInput { prompt,
 images }`, and returns `Ok(false)` instead of propagating the error. The
 `streamed_text` / `tool_activity` guards are what distinguish Phase 1 from
 Phases 2/3: they are the cross-thread aggregates of "did any model output or
-tool execution happen this turn", and they remain `false` exactly through the
+tool execution happen this round", and they remain `false` exactly through the
 Phase-1 window.
 
 The TUI's response listener pops the matching user message from the
@@ -108,10 +108,10 @@ prompts (pursuit continuation, verify nudge) are not unsentable: they are
 harness-internal and are never surfaced as editable user input.
 
 This is billing-clean at the conversation layer (no assistant message enters
-history, so no future turn re-sends phantom output, and the local token
+history, so no future round re-sends phantom output, and the local token
 ledger records zero), with one caveat: the HTTP request was already on the
 wire, so the provider may still charge the *input* tokens for the cancelled
-request. Phase 1 unsend saves you a bad conversation turn and all output
+request. Phase 1 unsend saves you a bad conversation round and all output
 tokens, but it cannot un-send the network packet. See
 [Billing reality](#billing-reality).
 
@@ -148,17 +148,17 @@ consequences are precise and important:
 - No assistant message enters `messages`, so it never enters `turn_history`,
   so it is never persisted and never sent in any future request's context.
 - `book_turn_usage` is never called, so the token ledger records **zero**
-  for this turn locally.
+  for this round locally.
 - On the wire, the SSE connection is dropped (the `stream` binding goes out
   of scope), which the provider treats as a stop signal.
 
 **No marker is inserted.** neenee does *not* inject a "the previous response
 was interrupted" note, system reminder, or `[ANSWER NO LONGER NEEDED]`
-placeholder into the context. From the next turn's point of view, the model
+placeholder into the context. From the next round's point of view, the model
 never replied — the conversation simply ends with the user's prompt. The
 only place an `[Interrupted]` string appears is as an ephemeral TUI render
-signal (`TurnEvent::Text`), which is never persisted. This is a deliberate
-choice: a marker would be an extra injected user/system turn that costs
+signal (`RoundEvent::Text`), which is never persisted. This is a deliberate
+choice: a marker would be an extra injected user/system round that costs
 tokens and can itself confuse the model, and the absence of a reply already
 conveys "cut short" well enough.
 
@@ -170,17 +170,17 @@ tools. This is "remote" in the sense that the work is now server/tool-side
 and driven by a *committed* assistant decision that is already in history.
 
 An interrupt here cannot undo the committed assistant message — it is
-already in `messages` and (via the mid-turn save point) may already be on
+already in `messages` and (via the mid-round save point) may already be on
 disk. Instead the harness:
 
 1. Emits a terminal `AgentEvent::ToolCancelled` for each in-flight tool, so
    the UI shows the cancellation rather than leaving tools hanging.
 2. Does **not** append the `Role::Tool` result messages for the cancelled
    tools.
-3. Does not persist the round via `append_round`.
+3. Does not persist the turn via `append_turn`.
 
-The committed assistant message stays. The next turn therefore sees an
-assistant turn that issued tool calls whose results never came back — which
+The committed assistant message stays. The next round therefore sees an
+assistant round that issued tool calls whose results never came back — which
 is exactly the state provider sanitizers are built to clean up at
 serialization time (see [Request flow](request-flow.md)): OpenAI-compatible
 endpoints strip unanswered `tool_calls` (and drop the assistant message if
@@ -192,7 +192,7 @@ wire-valid form before any provider sees it.
 ## Interrupted turns and the token ledger
 
 Because `book_turn_usage` sits after the streaming loop, an interrupt in
-Phase 1 or Phase 2 means the turn is recorded as **zero tokens** locally —
+Phase 1 or Phase 2 means the round is recorded as **zero tokens** locally —
 the authoritative `usage` chunk never arrived and the local estimator never
 ran on a finalized message. This is by design (there is no finalized message
 to estimate), but it produces a known divergence:
@@ -214,7 +214,7 @@ recover the exact number.
 An interrupt optimizes the *conversation* and the *local accounting*, not
 the *invoice*. Three layers, three different truths:
 
-**1. neenee's local ledger** — records zero for an interrupted turn (Phase 1
+**1. neenee's local ledger** — records zero for an interrupted round (Phase 1
 and 2) because `book_turn_usage` never runs. This is the number shown in the
 UI. It is a lower bound.
 
@@ -238,11 +238,11 @@ read the result. Three rules govern it:
   charged.
 
 **3. Prompt caching** — adds a wrinkle. On Anthropic (and OpenAI's
-automatic caching), the input tokens billed on the interrupted turn may
+automatic caching), the input tokens billed on the interrupted round may
 include cache-write (`cache_creation_input_tokens`) cost; the *next* request
 with the same prefix then hits cache-read pricing (cheaper). So an early
 interrupt on a fresh large context is disproportionately expensive relative
-to its (zero) local output, but it primes the cache for the retried turn.
+to its (zero) local output, but it primes the cache for the retried round.
 See [Token accounting](agent-design/token-accounting.md) for how neenee
 tracks cache tokens when they *are* reported.
 
@@ -263,14 +263,14 @@ only the second one:
 ## Why no "interrupted" marker in context
 
 A natural alternative to the current design is to record the fact of an
-interrupt in the context so the model "knows" its previous turn was cut
+interrupt in the context so the model "knows" its previous round was cut
 short — e.g. append a system or user message like `"[The previous response
 was interrupted by the user.]"`. neenee does not do this, for three
 reasons:
 
 1. **It costs tokens every time.** Every interrupt would inject a permanent
    message into the rolling context, inflating input cost on every
-   subsequent turn — the exact cost the interrupt was meant to avoid.
+   subsequent round — the exact cost the interrupt was meant to avoid.
 2. **The omission is already informative.** A conversation that ends with a
    user prompt and no assistant reply reads, to the model, exactly like the
    start of a fresh reply to that prompt. There is no ambiguity to resolve.
@@ -281,7 +281,7 @@ reasons:
 
 The trade-off is accepted consciously: if a future use case needs the model
 to be aware of a partial answer (for example, to explicitly resume it), the
-clean insertion point is in `execute_turn` (`orchestration.rs`) just after
+clean insertion point is in `execute_round` (`orchestration.rs`) just after
 the Phase-1 unsend check, where a marker message could be pushed into
 `turn_history` before the write-back. The current design leaves that hook
 unused.

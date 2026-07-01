@@ -37,9 +37,9 @@ use super::{Stream, TranscriptLayout};
 
 /// Round-banded layout. See module docs.
 #[derive(Default)]
-pub struct RoundBand;
+pub struct TurnBand;
 
-impl TranscriptLayout for RoundBand {
+impl TranscriptLayout for TurnBand {
     fn run(&mut self, stream: &mut Stream<'_, '_>) {
         let messages_len = stream.messages.len();
         let mut mi = 0;
@@ -122,7 +122,7 @@ impl TranscriptLayout for RoundBand {
 
 /// The round stamp of a message, or `None` if unknown.
 fn round_of(msg: &TranscriptMessage) -> Option<u64> {
-    msg.round
+    msg.turn
 }
 
 /// Is `mi` the start of a new round group? True when the previous message does
