@@ -7,20 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-07-02
+
 ### Added
 
-- **`/debug context` — dry-run the next request in a dedicated inspector.** A
-  new dev-only subcommand snapshots the exact model-visible context the next
-  turn would send (rebuilt head system message, auto-loaded skills, message
-  list, tool schemas, provider/model identity, context window, estimated token
-  pressure, and active pursuit) **without** calling the provider or mutating
-  any state. Instead of a flat transcript line it opens a new read-only
-  **Debug inspector modal** — three drill-in sections (Model & Context, Tools,
-  Messages) browsed with `↑/↓`/`Enter`, modelled on the token-report modal.
-  The full JSON (messages + tool schemas) is also persisted to one owner-only
-  file under the per-project `debug/` dir for offline inspection. Pairs with
-  `/debug network` (which captures real round-trips). Carried over the harness
-  channel by a new `AgentResponse::DebugSnapshot` variant + `Modal::Debug`.
+- **Phase-1 interrupt now unsends the user message.** When the user interrupts
+  a turn before any model output reaches the client (request in-flight, no
+  response bytes, no tool execution), the turn is now reversible at the
+  conversation layer: the user message is popped back out of the context and
+  session store, the transcript entry is removed, and the prompt (with any
+  pasted images) is restored into the input box for re-editing. Later interrupt
+  phases (mid-stream drop, tool cancel) are unchanged.
+
+- **`/debug context` — dry-run the next request as a file dump.** A dev-only
+  subcommand snapshots the exact model-visible context the next turn would send
+  (rebuilt head system message, auto-loaded skills, message list, tool schemas,
+  provider/model identity, context window, estimated token pressure, and active
+  pursuit) **without** calling the provider or mutating any state. The full JSON
+  (messages + tool schemas) is persisted to one owner-only file under the
+  per-project `debug/` dir for offline inspection. Pairs with `/debug network`
+  (which captures real round-trips).
 
 ### Changed
 
@@ -911,7 +917,8 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.13.2...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/ming2k/neenee/releases/tag/v0.14.0
 [0.13.2]: https://github.com/ming2k/neenee/releases/tag/v0.13.2
 [0.13.1]: https://github.com/ming2k/neenee/releases/tag/v0.13.1
 [0.11.0]: https://github.com/ming2k/neenee/releases/tag/v0.11.0
