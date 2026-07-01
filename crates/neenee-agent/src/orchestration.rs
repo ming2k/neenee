@@ -621,6 +621,13 @@ pub async fn execute_turn(
     // and the next turn won't carry the poison.  On success the whole
     // `turn_history` (with the assistant reply and any tool results)
     // replaces `history` atomically (see the success path below).
+    // Snapshot the user's prompt and images before they are moved into the
+    // user message. If the turn is interrupted in Phase 1 (request sent but no
+    // response bytes received), we unsend the message: pop it back out of the
+    // context and restore these to the TUI input box for re-editing.
+    let unsent_prompt = input.prompt.clone();
+    let unsent_images = input.images.clone();
+
     let mut turn_history = {
         let history = history.lock().await;
         let mut th = history.clone();
@@ -824,6 +831,41 @@ pub async fn execute_turn(
             _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
         }
     };
+    // Phase-1 unsend: if the user interrupted before any model output reached
+    // the client (no streamed text) and no tool has executed this turn, the
+    // turn is reversible at the conversation layer. Pop the user message back
+    // out of the context, revert the session store to its pre-turn state, and
+    // hand the prompt back to the TUI for re-editing. Returning `Ok(false)`
+    // (rather than propagating `Err(Interrupted)`) keeps
+    // `start_interactive_turn`'s interrupt handler from emitting the generic
+    // "... [Interrupted]" notice — the unsend is the user's intent here.
+    //
+    // Billing caveat (see docs/explanation/interrupt-semantics.md): the
+    // network request was already on the wire, so the provider may still bill
+    // the input tokens of the cancelled request. The unsend only guarantees a
+    // clean conversation context and zero output tokens — it cannot un-send
+    // the packet.
+    if matches!(result, Err(HarnessError::Interrupted))
+        && !streamed_text.load(Ordering::SeqCst)
+        && !tool_activity.load(Ordering::SeqCst)
+    {
+        // The user message is the last entry in `turn_history` (pushed before
+        // the streaming turn). Only a non-hidden turn is unsentable: hidden
+        // control prompts (pursuit continuation, verify nudge) are harness-
+        // internal and should not be surfaced as editable user input.
+        if turn_history.last().is_some_and(|m| m.role == Role::User && !input.hidden) {
+            turn_history.pop();
+            session.replace_messages(turn_history).await?;
+            let _ = tx.send(turn(
+                &session_id,
+                TurnEvent::UnsentInput {
+                    prompt: unsent_prompt,
+                    images: unsent_images,
+                },
+            ));
+            return Ok(false);
+        }
+    }
     if session.id().await != admitted_session_id {
         return Err(HarnessError::Interrupted);
     }

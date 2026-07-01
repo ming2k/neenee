@@ -128,6 +128,13 @@ pub(super) struct UiRuntime {
     /// Set by the response listener on a "running" `HarnessState` and cleared
     /// on idle; drives the muted `<elapsed>` segment in the activity bar.
     pub turn_started_at: Arc<Mutex<Option<std::time::Instant>>>,
+    /// Pending "unsend" from a Phase-1 interrupt: the response listener sets
+    /// this when the harness reports the user's message was unsent (interrupted
+    /// before any model output arrived), and the event loop drains it each
+    /// frame to restore the prompt into the input box for re-editing. Carried
+    /// as a signal (not direct `App` mutation) because the listener and the
+    /// loop own disjoint halves of `App`'s state.
+    pub unsent_input_signal: Arc<Mutex<Option<UnsentInput>>>,
 }
 
 /// A pending `/btw` side-view transition queued by the response listener and
@@ -137,6 +144,15 @@ pub(super) struct UiRuntime {
 pub(super) enum SideViewSignal {
     Opened { side_id: String },
     Closed,
+}
+
+/// A user message unsent by a Phase-1 interrupt (the turn was cancelled before
+/// any model output reached the client). The event loop drains this to restore
+/// the prompt and images into the input box and pop the user message out of the
+/// transcript, mirroring `App::recall_queued`'s composer restore.
+pub(super) struct UnsentInput {
+    pub prompt: String,
+    pub images: Vec<neenee_core::ImagePart>,
 }
 
 async fn handle_permission_submit(app: &mut App, runtime: &UiRuntime) {
@@ -632,6 +648,24 @@ pub(super) async fn run_app_loop(
                 app.exit_side_view();
             }
             None => {}
+        }
+
+        // Drain a pending Phase-1 unsend: the user interrupted before any model
+        // output arrived, the harness reverted the conversation context, and the
+        // listener already popped the user message from the transcript. Restore
+        // the prompt + images into the composer so the user can edit and resend
+        // — the same restore `App::recall_queued` performs for a queued message.
+        if let Some(unsent) = runtime.unsent_input_signal.lock().await.take() {
+            app.input = unsent.prompt;
+            app.set_cursor_end();
+            if !unsent.images.is_empty() {
+                app.pending_images = unsent.images;
+            }
+            // Mirror recall_queued's completion/history-nav cleanup so a stale
+            // popup or history cursor doesn't interfere with the restored draft.
+            app.history_index = None;
+            app.suggestion_index = None;
+            app.completion_dismissed = true;
         }
 
         // Drain the send queue when the harness returns to idle. The

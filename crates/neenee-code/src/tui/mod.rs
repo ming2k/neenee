@@ -209,6 +209,10 @@ pub async fn run_tui(
     let parent_status_clone = parent_status.clone();
     let side_view_signal = Arc::new(Mutex::new(None::<event_loop::SideViewSignal>));
     let side_view_signal_clone = side_view_signal.clone();
+    // Phase-1 unsend signal: set by the listener when the harness reports an
+    // `UnsentInput`, drained by the event loop to restore the composer.
+    let unsent_input_signal = Arc::new(Mutex::new(None::<event_loop::UnsentInput>));
+    let unsent_input_signal_clone = unsent_input_signal.clone();
 
     // `/serve` hot-attach tap (ADR-0037 §7). `None` until `/serve <port>`
     // activates it. The response listener clones each `AgentResponse` into the
@@ -331,6 +335,29 @@ pub async fn run_tui(
                                 .is_some_and(|message| message.role == Role::Assistant)
                             {
                                 msgs.pop();
+                            }
+                        }
+                        TurnEvent::UnsentInput { prompt, images } => {
+                            // Phase-1 unsend: the harness cancelled the turn
+                            // before any model output arrived and reverted the
+                            // conversation context. Pop the user message we
+                            // pushed into the transcript at send time and hand
+                            // the prompt back to the loop via the unsend signal
+                            // so it can restore the composer for re-editing.
+                            {
+                                let mut msgs = buf.write().await;
+                                if msgs
+                                    .last()
+                                    .is_some_and(|m| m.role == Role::User)
+                                {
+                                    msgs.pop();
+                                }
+                            }
+                            if !routes_to_side {
+                                *unsent_input_signal_clone.lock().await =
+                                    Some(event_loop::UnsentInput { prompt, images });
+                                ir_clone.store(false, Ordering::SeqCst);
+                                activity_clone.lock().await.clear();
                             }
                         }
                         TurnEvent::StreamReasoningDelta(delta) => {
@@ -1000,6 +1027,7 @@ pub async fn run_tui(
             current_round,
             review_alert,
             turn_started_at,
+            unsent_input_signal,
         },
         session,
     )

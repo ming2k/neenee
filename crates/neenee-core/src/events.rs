@@ -480,6 +480,18 @@ pub enum TurnEvent {
     StreamReasoningEnd(String),
     StreamEnd(String),
     StreamDiscard,
+    /// The user interrupted the turn before any model output reached the
+    /// client (Phase 1: request in-flight, no response bytes yet). The turn's
+    /// user message has been removed from the conversation context and session
+    /// store, and the TUI should restore `prompt` (and any `images`) into the
+    /// input box for re-editing — the conversation is back to its pre-send
+    /// state. The cancelled network request may still bill its input tokens
+    /// on the provider side, but no assistant message, tool calls, or output
+    /// tokens are produced or recorded.
+    UnsentInput {
+        prompt: String,
+        images: Vec<crate::ImagePart>,
+    },
     /// An envoy event to render nested inside the parent tool step.
     Envoy {
         parent_call_id: String,
