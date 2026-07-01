@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-07-02
+
+### Fixed
+
+- **cargo-deny license check passes.** The `v0.14.2` `deny` CI job failed on
+  licenses: `BSL-1.0` (`clipboard-win`, `error-code`, via `arboard`) and
+  `CDLA-Permissive-2.0` (`webpki-roots`/`webpki-root-certs`, from the rustls
+  TLS switch) were not on the allow-list. Both are permissive and now allowed.
+
 ## [0.14.2] - 2026-07-02
 
 ### Fixed
@@ -967,7 +976,8 @@ TUI, tool use, on-demand skills, plan mode, and durable sessions.
   `neenee-agent` ← `neenee-cli`) with typed errors and a unified agent loop.
 - Standardized on MIT-only licensing.
 
-[Unreleased]: https://github.com/ming2k/neenee/compare/v0.14.2...HEAD
+[Unreleased]: https://github.com/ming2k/neenee/compare/v0.14.3...HEAD
+[0.14.3]: https://github.com/ming2k/neenee/releases/tag/v0.14.3
 [0.14.2]: https://github.com/ming2k/neenee/releases/tag/v0.14.2
 [0.14.1]: https://github.com/ming2k/neenee/releases/tag/v0.14.1
 [0.14.0]: https://github.com/ming2k/neenee/releases/tag/v0.14.0
