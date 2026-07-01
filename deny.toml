@@ -53,6 +53,14 @@ allow = [
     "CC0-1.0",
     "Unlicense",
     "0BSD",
+    # BSL-1.0 (Boost Software License): OSI+FSF-approved, permissive,
+    # GPL-compatible. Used by `clipboard-win` and `error-code` (transitive via
+    # `arboard`).
+    "BSL-1.0",
+    # CDLA-Permissive-2.0: a permissive *data* license (not a code license)
+    # governing the embedded Mozilla root CA bundle in `webpki-roots` /
+    # `webpki-root-certs`, which rustls uses for static, system-cert-free TLS.
+    "CDLA-Permissive-2.0",
 ]
 # Confidence threshold for the license detection. A higher value means cargo-deny
 # must be more certain about a crate's license before accepting it, reducing the
